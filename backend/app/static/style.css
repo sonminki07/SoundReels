@@ -1,0 +1,43 @@
+/* SoundReels Spotify Dark Theme Styles */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #121212;
+}
+::-webkit-scrollbar-thumb {
+  background: #282828;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #444444;
+}
+
+.cat-btn.active {
+  background-color: #2a2a2a;
+  color: #1DB954;
+  font-weight: 700;
+}
+
+.slot-item {
+  transition: all 0.15s ease-in-out;
+}
+.slot-item:hover {
+  background-color: #242424;
+}
+.slot-item.active {
+  background-color: #282828;
+  border-left: 3px solid #1DB954;
+}
+
+.candidate-item.active {
+  background-color: #2a2a2a;
+  border-left: 3px solid #1DB954;
+}
+
+.dock-btn.active {
+  border-color: #1DB954;
+  background-color: #222222;
+  color: #1DB954;
+}

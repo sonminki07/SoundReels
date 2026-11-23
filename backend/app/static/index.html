@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SoundReels — Game SFX Explorer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans">
+
+  <!-- TOP BAR (Spotify Style) -->
+  <header class="h-14 border-b border-[#282828] bg-[#000000] px-6 flex items-center justify-between shrink-0 z-20">
+    <div class="flex items-center space-x-4">
+      <div class="flex items-center space-x-2">
+        <span class="text-2xl font-black tracking-tight text-[#1DB954]">🎧 SoundReels</span>
+        <span class="text-xs bg-[#242424] text-gray-400 px-2 py-0.5 rounded border border-[#383838]">v1.1</span>
+      </div>
+    </div>
+    
+    <!-- Search / Filter -->
+    <div class="flex-1 max-w-md mx-8">
+      <div class="relative">
+        <input id="searchInput" type="text" placeholder="슬롯 검색 (예: 철문, 엘리베이터, 발소리...)"
+          class="w-full bg-[#242424] hover:bg-[#2a2a2a] focus:bg-[#333333] text-sm text-white px-4 py-2 pl-9 rounded-full outline-none border border-transparent focus:border-[#555] transition">
+        <svg class="w-4 h-4 text-gray-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+        </svg>
+      </div>
+    </div>
+
+    <div class="flex items-center space-x-3 text-xs text-gray-400">
+      <span class="inline-flex items-center gap-1.5 bg-[#181818] px-3 py-1.5 rounded-full border border-[#282828]">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="activeSlotBadge">프로젝트 로딩 중...</span>
+      </span>
+      <button id="toggleLeftBtn" class="hover:text-white px-2 py-1 rounded bg-[#222]">좌측 패널</button>
+    </div>
+  </header>
+
+  <!-- MAIN VIEWPORT -->
+  <div class="flex flex-1 overflow-hidden relative">
+
+    <!-- LEFT PANEL (Expandable / Flexible) -->
+    <aside id="leftPanel" class="w-64 bg-[#181818] border-r border-[#282828] p-4 flex flex-col space-y-4 shrink-0 transition-all duration-300">
+      <div class="flex items-center justify-between pb-2 border-b border-[#282828]">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-gray-400">카테고리 필터</h3>
+        <span id="totalSlotsCount" class="text-xs text-[#1DB954] font-mono">30 Slots</span>
+      </div>
+      <div id="categoryFilters" class="space-y-1 text-sm overflow-y-auto flex-1 pr-1">
+        <button data-cat="all" class="cat-btn w-full text-left px-3 py-1.5 rounded bg-[#282828] text-white font-medium">전체 보기</button>
+        <button data-cat="weapon" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">무기 / 발사</button>
+        <button data-cat="combat" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">근접 / 타격</button>
+        <button data-cat="player" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">플레이어</button>
+        <button data-cat="item" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">아이템 / 쿠키</button>
+        <button data-cat="skill" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">스킬 / 쉴드</button>
+        <button data-cat="ui" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">UI 전자음</button>
+        <button data-cat="elevator" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">엘리베이터</button>
+        <button data-cat="enemy" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">잡몹</button>
+        <button data-cat="boss" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">보스</button>
+        <button data-cat="environment" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">환경음</button>
+        <button data-cat="gimmick" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">기믹 / 함정</button>
+      </div>
+      
+      <!-- Safe Commercial License Badge Box -->
+      <div class="bg-[#121212] p-3 rounded-lg border border-[#2b2b2b] text-[11px] text-gray-400 space-y-1">
+        <div class="text-emerald-400 font-semibold flex items-center gap-1">
+          <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>
+          상업 게임 안전 보장
+        </div>
+        <p>LotsOfSounds 무인증 CC0 사운드 및 로컬 절차적 생성 음원만 대기열에 노출됩니다.</p>
+      </div>
+    </aside>
+
+    <!-- CENTER CANVAS (Sound Screen + Menu + Control Bar) -->
+    <main class="flex-1 flex flex-col items-center justify-between p-6 relative overflow-hidden bg-gradient-to-b from-[#1e1e1e] to-[#121212]">
+      
+      <!-- Dynamic Ambient Glow Backdrop (Timbre based) -->
+      <div id="ambientBackdrop" class="absolute inset-0 opacity-20 pointer-events-none transition-colors duration-700 bg-emerald-600 blur-3xl"></div>
+
+      <!-- Current Slot Title Breadcrumb -->
+      <div class="w-full max-w-2xl text-center space-y-1 z-10">
+        <div class="flex items-center justify-center gap-2">
+          <span id="currentSlotCategory" class="text-[11px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#282828] text-gray-300 font-mono">SLOT</span>
+          <h2 id="currentSlotName" class="text-2xl font-black text-white">슬롯 선택 필요</h2>
+        </div>
+        <p id="currentSlotMemo" class="text-xs text-gray-400 italic">기획 메모가 여기에 표시됩니다.</p>
+      </div>
+
+      <!-- 1. 소리 화면 (Spotify Album Art Style Card with Spectrum Visualizer) -->
+      <div id="soundScreen" class="w-full max-w-lg aspect-video bg-[#181818]/90 backdrop-blur-md rounded-2xl border border-[#333] shadow-2xl p-6 flex flex-col justify-between relative overflow-hidden z-10 group">
+        
+        <!-- Top Metadata Pill -->
+        <div class="flex items-center justify-between text-xs">
+          <span id="soundBadgeSource" class="bg-[#242424] text-emerald-400 font-semibold px-2.5 py-1 rounded-full border border-emerald-900/50">LotsOfSounds · CC0</span>
+          <span id="soundMatchScore" class="bg-[#242424] text-gray-300 font-mono px-2.5 py-1 rounded-full border border-[#383838]">92% Match</span>
+        </div>
+
+        <!-- Center Waveform / Spectrum Canvas -->
+        <div class="flex-1 flex flex-col items-center justify-center my-2 relative">
+          <canvas id="waveformCanvas" class="w-full h-24 rounded-lg"></canvas>
+          <div id="loadingSpinner" class="hidden absolute inset-0 bg-[#181818]/80 flex items-center justify-center">
+            <span class="text-xs text-gray-400 animate-pulse">오디오 로딩 중...</span>
+          </div>
+        </div>
+
+        <!-- Bottom Sound Title -->
+        <div class="flex items-end justify-between">
+          <div>
+            <h1 id="currentSoundName" class="text-lg font-bold text-white tracking-wide truncate max-w-xs">사운드를 선택하세요</h1>
+            <p id="currentSoundMeta" class="text-xs text-gray-400">0.0s · CC0 Universal</p>
+          </div>
+          <span id="queuePosition" class="text-xs font-mono text-gray-500">1 / 8</span>
+        </div>
+      </div>
+
+      <!-- 2. 메뉴 (Quick Action Buttons Bar) -->
+      <div id="actionBar" class="flex items-center space-x-3 z-10">
+        <button id="btnLike" title="찜/중간저장 (S)"
+          class="flex items-center gap-1.5 px-4 py-2.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-yellow-400 border border-[#383838] text-xs font-bold transition shadow-lg active:scale-95">
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"></path></svg>
+          찜 (S)
+        </button>
+
+        <button id="btnSimilar" title="이 소리와 비슷한 것 (F)"
+          class="flex items-center gap-1.5 px-4 py-2.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-cyan-400 border border-[#383838] text-xs font-bold transition shadow-lg active:scale-95">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+          비슷한 것 (F)
+        </button>
+
+        <button id="btnMutate" title="즉석 변형 (M)"
+          class="flex items-center gap-1.5 px-4 py-2.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-purple-400 border border-[#383838] text-xs font-bold transition shadow-lg active:scale-95">
+          🎲 즉석 변형 (M)
+        </button>
+
+        <button id="btnConfirm" title="슬롯 확정 및 채택 (Enter)"
+          class="flex items-center gap-1.5 px-6 py-2.5 rounded-full bg-[#1DB954] hover:bg-[#1ed760] text-black font-black text-xs transition shadow-xl active:scale-95">
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg>
+          최종 채택 (Enter)
+        </button>
+      </div>
+
+      <!-- 3. 컨트롤 바 (Transport & Time Slider) -->
+      <div id="controlBar" class="w-full max-w-xl bg-[#181818]/80 backdrop-blur border border-[#2a2a2a] rounded-xl px-5 py-3 flex flex-col space-y-2 z-10 shadow-lg">
+        <div class="flex items-center justify-center space-x-6">
+          <button id="btnPrev" title="이전 사운드 (↑ / K)" class="text-gray-400 hover:text-white transition">
+            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M8.445 14.832A1 1 0 0010 14v-2.798l5.445 3.63A1 1 0 0017 14V6a1 1 0 00-1.555-.832L10 8.798V6a1 1 0 00-1.555-.832l-6 4a1 1 0 000 1.664l6 4z"></path></svg>
+          </button>
+          
+          <button id="btnPlay" title="재생 / 일시정지 (Space)" class="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 active:scale-95 transition shadow-lg">
+            <svg id="playIcon" class="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg>
+            <svg id="pauseIcon" class="w-5 h-5 hidden" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path></svg>
+          </button>
+
+          <button id="btnNext" title="다음 사운드로 넘기기 (↓ / J)" class="text-gray-400 hover:text-white transition">
+            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M4.555 5.168A1 1 0 003 6v8a1 1 0 001.555.832L10 11.202V14a1 1 0 001.555.832l6-4a1 1 0 000-1.664l-6-4A1 1 0 0010 6v2.798L4.555 5.168z"></path></svg>
+          </button>
+
+          <button id="btnLoop" title="반복 재생 (L)" class="text-gray-400 hover:text-emerald-400 transition text-xs font-mono font-bold">
+            🔁 1
+          </button>
+        </div>
+
+        <!-- Time Slider -->
+        <div class="flex items-center space-x-3 text-xs font-mono text-gray-400">
+          <span id="timeCurrent">0:00</span>
+          <input id="timeSeek" type="range" min="0" max="100" value="0" class="flex-1 accent-[#1DB954] cursor-pointer h-1 bg-[#333] rounded-lg">
+          <span id="timeDuration">0:00</span>
+        </div>
+      </div>
+    </main>
+
+    <!-- RIGHT PANEL: 28 SLOTS CHECKLIST & CANDIDATE QUEUE -->
+    <aside class="w-80 bg-[#181818] border-l border-[#282828] flex flex-col shrink-0">
+      <!-- Tabs -->
+      <div class="flex border-b border-[#282828] text-xs font-bold text-center">
+        <button id="tabSlotsBtn" class="flex-1 py-3 border-b-2 border-[#1DB954] text-white">사운드 슬롯 (30)</button>
+        <button id="tabCandidatesBtn" class="flex-1 py-3 border-b-2 border-transparent text-gray-400 hover:text-white">추천 대기열</button>
+      </div>
+
+      <!-- Tab 1: Slots List -->
+      <div id="tabSlots" class="flex-1 overflow-y-auto p-2 space-y-1">
+        <!-- Rendered dynamically -->
+      </div>
+
+      <!-- Tab 2: Candidate Queue for Active Slot -->
+      <div id="tabCandidates" class="flex-1 overflow-y-auto p-2 space-y-1 hidden">
+        <!-- Rendered dynamically -->
+      </div>
+
+      <!-- Confirmed / Export Status Footer -->
+      <div class="p-3 border-t border-[#282828] bg-[#121212] text-xs space-y-2">
+        <div class="flex justify-between items-center text-gray-400">
+          <span>확정 완료율</span>
+          <span id="confirmedProgress" class="font-mono text-emerald-400 font-bold">0 / 30</span>
+        </div>
+        <div class="w-full bg-[#242424] h-1.5 rounded-full overflow-hidden">
+          <div id="progressBar" class="bg-[#1DB954] h-full transition-all duration-300" style="width: 0%"></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- BOTTOM DOCK: [1] [2] [3] [4] [5] QUICK COMPARE & UNITY EXPORT BAR (Sketch Reflect) -->
+  <footer class="h-16 bg-[#000000] border-t border-[#282828] px-6 flex items-center justify-between shrink-0 z-20">
+    <!-- Quick Compare Dock [1~5] -->
+    <div class="flex items-center space-x-2">
+      <span class="text-[11px] font-bold text-gray-400 mr-1 uppercase font-mono">비교 독:</span>
+      <div id="compareDock" class="flex items-center space-x-2">
+        <button data-dock="0" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
+          <span class="font-bold text-[10px] text-gray-500">[1]</span>
+          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        </button>
+        <button data-dock="1" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
+          <span class="font-bold text-[10px] text-gray-500">[2]</span>
+          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        </button>
+        <button data-dock="2" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
+          <span class="font-bold text-[10px] text-gray-500">[3]</span>
+          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        </button>
+        <button data-dock="3" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
+          <span class="font-bold text-[10px] text-gray-500">[4]</span>
+          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        </button>
+        <button data-dock="4" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
+          <span class="font-bold text-[10px] text-gray-500">[5]</span>
+          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Unity Project Export Bar -->
+    <div class="flex items-center space-x-3">
+      <input id="unityPathInput" type="text" placeholder="Unity 프로젝트 경로 (예: C:/MyGame/)"
+        class="w-64 bg-[#181818] border border-[#333] text-xs text-white px-3 py-1.5 rounded outline-none focus:border-[#1DB954]">
+      <button id="btnUnityExport" class="bg-[#242424] hover:bg-[#333] text-white border border-[#444] px-4 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition">
+        <span>Unity 내보내기</span>
+      </button>
+    </div>
+  </footer>
+
+  <!-- Hidden Native Audio Element -->
+  <audio id="audioPlayer"></audio>
+
+  <script src="app.js"></script>
+</body>
+</html>
