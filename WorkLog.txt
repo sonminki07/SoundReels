@@ -353,3 +353,18 @@
   - `verify_v23.py` 통과: 1kHz 연속 비프/무음 DSP 차단 및 실제 찜 종소리 통과, DB 정화(99건 이동, `liked=13`/`confirmed=4` 보존, 25.5초 초과 미찜 0건), 유사 탐색 결과 최대 `3.8s` 이내 클린 후보 확인
   - `test_v12.py` 회귀 테스트 전체 통과
 ================================================================================
+
+19. 타 PC 포터블 실행 지원 및 현재 작업 상태(DB + 활성 음원 272개) GitHub 동기화 업로드
+--------------------------------------------------------------------------------
+- 구현 내역:
+  1) 크로스 PC 경로 포터블화 (`db.py`, `main.py`, `sound_scout.py`):
+     - `resolve_audio_path`, `resolve_scene_path` 헬퍼 추가 및 `init_db()` 시 타 PC 절대 경로(`E:\SoundReels\...`)를 현재 실행 경로(`AUDIO_CACHE_DIR` / `SCENE_CACHE_DIR`)로 자동 정규화
+     - 삭제함 복구 등으로 로컬 캐시에 없는 외부 음원 재생 시 `get_sound_audio()`에서 자동 재다운로드 보완
+  2) 원클릭 설치/실행 & 작업 백업 스크립트 (`SoundReels.bat`, `Sync_State_to_GitHub.bat`, `scripts/sync_state.py`, `README.md`):
+     - `SoundReels.bat`: `%~dp0` 상대 경로 전환 및 새 PC 최초 실행 시 `.venv`, PyTorch(CUDA/CPU), `requirements.txt` 자동 설치 후 실행
+     - `Sync_State_to_GitHub.bat` / `scripts/sync_state.py`: WAL 체크포인트(`PRAGMA wal_checkpoint(TRUNCATE)`) 후 `soundreels.db`·활성 음원(`status != 'skipped'`)·장면 미디어만 선별 GitHub 푸시
+  3) 현재 작업 상태 GitHub 푸시 (`.gitignore`, `data/db/soundreels.db`, `data/audio_cache/` 272개 MP3):
+     - 임시/브라우저 캐시·미사용 거대 폐기 파일은 제외하고 DB + 272개 활성 음원(약 25MB)을 커밋·푸시
+- 검증 결과 (QA 통과):
+  - 임시 경로(`scratch/clone_verify`)로 GitHub 저장소 신규 `git clone --depth 1` 후 `init_db()` 검증: 활성 후보 308건(`liked=13`, `confirmed=4`) MP3 누락 0건, 구 경로 잔존 0건 확인
+================================================================================
