@@ -136,6 +136,7 @@ def init_db():
         _ensure_column(c, "slots", "scene_in", "REAL DEFAULT 0.0")
         _ensure_column(c, "slots", "scene_out", "REAL DEFAULT 0.0")
         _ensure_column(c, "slots", "sound_offset", "REAL DEFAULT 0.0")
+        _ensure_column(c, "slots", "review_passed", "INTEGER DEFAULT 0")
         _ensure_column(c, "slot_candidates", "audio_in", "REAL DEFAULT 0.0")
         _ensure_column(c, "slot_candidates", "audio_out", "REAL DEFAULT 0.0")
         _ensure_column(c, "slot_candidates", "playback_rate", "REAL DEFAULT 1.0")

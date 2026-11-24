@@ -136,6 +136,10 @@ class UnconfirmRequest(BaseModel):
 
 class BatchExportRequest(BaseModel):
     unity_project_path: str
+    passed_only: bool = False
+
+class ReviewPassRequest(BaseModel):
+    passed: bool = True
 
 class SimilarRequest(BaseModel):
     slot_id: str
@@ -235,6 +239,7 @@ def _enrich_slot_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     d["scene_in"] = float(d.get("scene_in") or 0.0)
     d["scene_out"] = float(d.get("scene_out") or 0.0)
     d["sound_offset"] = float(d.get("sound_offset") or 0.0)
+    d["review_passed"] = bool(d.get("review_passed") or 0)
     return d
 
 # --- API Endpoints ---
@@ -275,6 +280,32 @@ def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
             ORDER BY s.created_at ASC
             """)
         slots = [_enrich_slot_dict(dict(r)) for r in c.fetchall()]
+
+        # Attach active confirmed sound summary per slot for Review Checklist & Receipt Preview
+        c.execute("""
+        SELECT sc.slot_id, sc.sound_id,
+               COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+               COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               snd.name, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id,
+               COALESCE(snd.norm_gain, 1.0) as norm_gain
+        FROM slot_candidates sc
+        JOIN sounds snd ON sc.sound_id = snd.id
+        WHERE sc.status = 'confirmed'
+        ORDER BY sc.rank ASC
+        """)
+        confirmed_map: Dict[str, Dict[str, Any]] = {}
+        for cr in c.fetchall():
+            item = dict(cr)
+            sid_slot = item["slot_id"]
+            if sid_slot not in confirmed_map:
+                urls = resolve_source_urls(item)
+                item["source_kind"] = urls["source_kind"]
+                item["original_source_url"] = urls["original_source_url"]
+                item["catalog_url"] = urls["catalog_url"]
+                confirmed_map[sid_slot] = item
+
+        for sl in slots:
+            sl["confirmed_sound"] = confirmed_map.get(sl["id"])
     return {"slots": slots}
 
 @app.get("/api/slots/{slot_id}")
@@ -853,12 +884,33 @@ def unconfirm_candidate(req: UnconfirmRequest):
             )
             has_cands = c.fetchone()["cnt"] > 0
             new_slot_status = "has_candidates" if has_cands else "pending"
-            c.execute("UPDATE slots SET status = ? WHERE id = ?", (new_slot_status, req.slot_id))
+            c.execute("UPDATE slots SET status = ?, review_passed = 0 WHERE id = ?", (new_slot_status, req.slot_id))
         else:
             new_slot_status = "confirmed"
 
         conn.commit()
     return {"status": "ok", "slot_id": req.slot_id, "new_slot_status": new_slot_status}
+
+@app.post("/api/slots/{slot_id}/review_pass")
+def set_slot_review_pass(slot_id: str, req: ReviewPassRequest):
+    """Marks a confirmed slot as passed (ready for export) or sends it back to pending review tasks."""
+    validate_id(slot_id, "slot_id")
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, status FROM slots WHERE id = ?", (slot_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Slot not found")
+        if req.passed:
+            c.execute(
+                "SELECT COUNT(*) as cnt FROM slot_candidates WHERE slot_id = ? AND status = 'confirmed'",
+                (slot_id,),
+            )
+            if c.fetchone()["cnt"] == 0:
+                raise HTTPException(status_code=400, detail="먼저 이 슬롯의 사운드를 '최종 채택(확정)'해 주세요.")
+        c.execute("UPDATE slots SET review_passed = ? WHERE id = ?", (1 if req.passed else 0, slot_id))
+        conn.commit()
+    return {"status": "ok", "slot_id": slot_id, "review_passed": bool(req.passed)}
 
 @app.post("/api/actions/reorder_similar")
 def reorder_similar(req: SimilarRequest):
@@ -939,6 +991,101 @@ def mutate_sound(req: MutateRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mutation error: {e}")
 
+def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = False) -> Dict[str, Any]:
+    """Builds structured receipt entries and formatted Korean receipt text."""
+    from datetime import datetime
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entries = []
+    lines = [
+        "================================================================================",
+        "                     🎧 SoundReels 최종 확정 · 내보내기 영수증                    ",
+        "================================================================================",
+        f"발급 일시 : {now_str}",
+        f"내보내기 범위 : {'총점검 패스 완료 항목만' if passed_only else '전체 확정 완료 항목'} ({len(rows)}건)",
+        "--------------------------------------------------------------------------------",
+    ]
+
+    for idx, item in enumerate(rows, start=1):
+        urls = resolve_source_urls(item)
+        kind = urls["source_kind"]
+        src_url = urls["original_source_url"] or item.get("source_url") or ""
+        if kind == "ai_generated":
+            source_desc = "🤖 AI / 로컬 자체 생성 (외부 출처 및 크레딧 표기 불필요)"
+        elif kind == "ai_mutated":
+            source_desc = f"🎲 AI 로컬 변형 (원곡 출처: {src_url})"
+        else:
+            source_desc = f"🌐 {src_url} ({item.get('license_type', 'CC0')} · {item.get('author', 'Unknown')})"
+
+        a_in = float(item.get("audio_in") or 0.0)
+        a_out = float(item.get("audio_out") or 0.0)
+        raw_dur = float(item.get("duration") or 0.0)
+        rate = float(item.get("playback_rate") or 1.0)
+        p_pitch = bool(item.get("preserve_pitch", 1))
+        has_trim = (a_in > 0.0) or (a_out > 0.0)
+        trim_desc = f"{a_in:.2f}s ~ {(a_out if a_out > a_in else raw_dur):.2f}s" if has_trim else f"전체 자동 무음제거 (원본 {raw_dur:.2f}s)"
+        clip_len = (max(0.05, (a_out if a_out > a_in else raw_dur) - a_in) if has_trim else raw_dur)
+        eff_len = clip_len / max(0.25, rate)
+        speed_desc = f"{rate:.2f}x ({'피치유지' if p_pitch else '피치연동'})" if abs(rate - 1.0) >= 0.01 else "1.00x (원속도)"
+        rel_wav = f"Assets/Audio/SFX/{item['slot_id']}/{item['slot_id']}_01.wav"
+
+        entry = {
+            "no": idx,
+            "slot_id": item["slot_id"],
+            "slot_name": item.get("slot_name") or item["slot_id"],
+            "slot_memo": item.get("slot_memo") or "",
+            "output_wav": rel_wav,
+            "sound_id": item["sound_id"],
+            "sound_name": item["name"],
+            "source_kind": kind,
+            "source_url": src_url,
+            "license_type": item.get("license_type", "CC0"),
+            "author": item.get("author", "Unknown"),
+            "trim": trim_desc,
+            "playback_rate": round(rate, 2),
+            "preserve_pitch": p_pitch,
+            "effective_duration": round(eff_len, 2),
+        }
+        entries.append(entry)
+        lines.extend([
+            f"[{idx:02d}] 용도/슬롯 : {entry['slot_name']} ({entry['slot_id']})",
+            f"     메모      : {entry['slot_memo']}",
+            f"     출력 파일 : {rel_wav}",
+            f"     원본 음원 : {entry['sound_name']}",
+            f"     출처 정보 : {source_desc}",
+            f"     편집/배속 : 자르기 [{trim_desc}] · 배속 [{speed_desc}] · 예상 길이 [{eff_len:.2f}s] · -1.0dBFS WAV",
+            "--------------------------------------------------------------------------------",
+        ])
+
+    if not entries:
+        lines.append("(내보낼 확정 또는 패스 완료 항목이 없습니다.)")
+        lines.append("--------------------------------------------------------------------------------")
+    lines.append(f"총 {len(entries)}개 사운드 검증 및 패키징 완료 · Generated by SoundReels")
+    lines.append("================================================================================")
+    return {"receipt_text": "\n".join(lines), "entries": entries, "generated_at": now_str}
+
+
+@app.get("/api/export/receipt_preview")
+def preview_export_receipt(passed_only: bool = Query(default=False)):
+    """Returns live receipt preview of confirmed (or review-passed) sounds before export."""
+    with get_db_context() as conn:
+        c = conn.cursor()
+        extra_where = "AND COALESCE(s.review_passed, 0) = 1" if passed_only else ""
+        c.execute(f"""
+        SELECT sc.slot_id, sc.sound_id,
+               COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+               COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               s.name as slot_name, s.memo as slot_memo,
+               snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
+        FROM slot_candidates sc
+        JOIN slots s ON sc.slot_id = s.id
+        JOIN sounds snd ON sc.sound_id = snd.id
+        WHERE sc.status = 'confirmed' {extra_where}
+        ORDER BY s.created_at ASC
+        """)
+        rows = [dict(r) for r in c.fetchall()]
+    return _format_receipt_entries(rows, passed_only=passed_only)
+
+
 @app.post("/api/export/batch_unity")
 def batch_export_to_unity(req: BatchExportRequest):
     target_root = Path(req.unity_project_path).resolve()
@@ -948,17 +1095,21 @@ def batch_export_to_unity(req: BatchExportRequest):
     dest_base = target_root / "Assets" / "Audio" / "SFX"
     dest_base.mkdir(parents=True, exist_ok=True)
 
-    exported_count = 0
+    exported_rows: List[Dict[str, Any]] = []
     with get_db_context() as conn:
         c = conn.cursor()
-        c.execute("""
+        extra_where = "AND COALESCE(s.review_passed, 0) = 1" if req.passed_only else ""
+        c.execute(f"""
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               snd.name, snd.author, snd.source_url, snd.source_id, snd.license_type
+               s.name as slot_name, s.memo as slot_memo,
+               snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
         FROM slot_candidates sc
+        JOIN slots s ON sc.slot_id = s.id
         JOIN sounds snd ON sc.sound_id = snd.id
-        WHERE sc.status = 'confirmed'
+        WHERE sc.status = 'confirmed' {extra_where}
+        ORDER BY s.created_at ASC
         """)
         confirmed_items = [dict(r) for r in c.fetchall()]
 
@@ -979,11 +1130,36 @@ def batch_export_to_unity(req: BatchExportRequest):
                         preserve_pitch=bool(item["preserve_pitch"]),
                     )
                     urls = resolve_source_urls(item)
-                    credit_url = urls["original_source_url"] or item["source_url"]
-                    f.write(f'"{item["name"]}" ({credit_url}) by {item["author"]} - License: {item["license_type"]}\n')
-                    exported_count += 1
+                    credit_url = urls["original_source_url"] or item["source_url"] or "local://ai-generated"
+                    f.write(f'[{item["slot_name"]}] "{item["name"]}" ({credit_url}) by {item["author"]} - License: {item["license_type"]}\n')
+                    exported_rows.append(item)
 
-    return {"status": "ok", "exported_count": exported_count, "destination": str(dest_base)}
+    receipt_bundle = _format_receipt_entries(exported_rows, passed_only=req.passed_only)
+    receipt_txt_path = target_root / "SOUNDREELS_RECEIPT.txt"
+    receipt_json_path = target_root / "SOUNDREELS_RECEIPT.json"
+    receipt_txt_path.write_text(receipt_bundle["receipt_text"], encoding="utf-8")
+    receipt_json_path.write_text(
+        json.dumps(
+            {
+                "generated_at": receipt_bundle["generated_at"],
+                "passed_only": req.passed_only,
+                "exported_count": len(exported_rows),
+                "items": receipt_bundle["entries"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    return {
+        "status": "ok",
+        "exported_count": len(exported_rows),
+        "destination": str(dest_base),
+        "receipt_path": str(receipt_txt_path),
+        "receipt_json_path": str(receipt_json_path),
+        "receipt_text": receipt_bundle["receipt_text"],
+    }
 
 # Mount static files for Frontend
 STATIC_DIR = Path(__file__).resolve().parent / "static"

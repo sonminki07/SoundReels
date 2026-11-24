@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SoundReels — Game SFX Explorer</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="style.css?v=1.9">
+  <link rel="stylesheet" href="style.css?v=2.0">
 </head>
 <body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans text-[14px]">
 
@@ -13,7 +13,7 @@
   <header class="h-14 border-b border-[#282828] bg-[#000000] px-6 flex items-center justify-between shrink-0 z-20">
     <div class="flex items-center space-x-3">
       <span class="text-2xl font-black tracking-tight text-[#1DB954]">🎧 SoundReels</span>
-      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v1.9</span>
+      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v2.0</span>
     </div>
     
     <!-- Search / Filter -->
@@ -38,6 +38,10 @@
         <span>🔄 업데이트 가능</span>
         <span id="updateDot" class="w-2 h-2 rounded-full bg-[#1DB954] animate-ping"></span>
       </button>
+      <button id="btnOpenReviewView" title="내보내기 전 영상+소리 최종 총점검 화면으로 전환"
+        class="hover:text-black px-3.5 py-1.5 rounded-full bg-amber-950/70 hover:bg-amber-400 border border-amber-500 text-xs font-black text-amber-300 transition">
+        🔍 총점검
+      </button>
       <button id="btnOpenSettings" title="단축키 · 스페이스바 연타 · 재생 조작 설정"
         class="hover:text-white px-3 py-1.5 rounded-full bg-[#222] hover:bg-[#303030] border border-[#333] text-xs font-semibold text-gray-200">
         ⚙️ 설정
@@ -50,8 +54,8 @@
     </div>
   </header>
 
-  <!-- MAIN VIEWPORT -->
-  <div class="flex flex-1 overflow-hidden relative">
+  <!-- MAIN WORKSPACE VIEWPORT -->
+  <div id="workspaceView" class="flex flex-1 overflow-hidden relative">
 
     <!-- LEFT PANEL (Resizable) -->
     <aside id="leftPanel" style="width: 245px; min-width: 160px; max-width: 460px;" class="bg-[#181818] border-r border-[#282828] p-4 flex flex-col space-y-4 shrink-0 overflow-hidden">
@@ -354,14 +358,18 @@
         <!-- Rendered dynamically -->
       </div>
 
-      <!-- Confirmed / Export Status Footer -->
+      <!-- Confirmed / Liked / Export Status Footer -->
       <div class="p-3 border-t border-[#282828] bg-[#121212] text-[13px] space-y-2">
-        <div class="flex justify-between items-center text-gray-300 gap-2">
-          <div class="flex items-center gap-2">
-            <span>확정 완료율</span>
-            <button id="btnFilterConfirmed" title="완료(확정)된 항목만 모아보기 / 전체 보기"
+        <div class="flex justify-between items-center text-gray-300 gap-1.5 flex-wrap">
+          <div class="flex items-center gap-1.5">
+            <span>완료율</span>
+            <button id="btnFilterLiked" title="찜해둔 후보가 있는 슬롯만 보기"
+              class="px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-amber-300 border border-[#383838] text-[11px] font-semibold transition">
+              ⭐ 찜만
+            </button>
+            <button id="btnFilterConfirmed" title="확정 완료된 슬롯만 보기"
               class="px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838] text-[11px] font-semibold transition">
-              확정만 보기
+              ✅ 확정만
             </button>
           </div>
           <span id="confirmedProgress" class="font-mono text-emerald-400 font-bold">0 / 30</span>
@@ -376,11 +384,14 @@
   <!-- BOTTOM RESIZER -->
   <div id="bottomResizer" class="resizer-h" title="드래그하여 하단 영역 높이 조절"></div>
 
-  <!-- BOTTOM DOCK: [1] [2] [3] [4] [5] QUICK COMPARE & UNITY EXPORT BAR (Resizable & Auto-Stretching) -->
+  <!-- BOTTOM DOCK: PER-SLOT [1~5] QUICK COMPARE & UNITY EXPORT BAR -->
   <footer id="bottomFooter" style="height: 76px; min-height: 58px; max-height: 240px;" class="bg-[#000000] border-t border-[#282828] px-6 py-2.5 flex items-stretch justify-between gap-4 shrink-0 z-20 overflow-hidden">
-    <!-- Quick Compare Dock [1~5] (Stretches proportionally when footer grows) -->
+    <!-- Quick Compare Dock [1~5] (Scoped per active slot!) -->
     <div class="flex items-stretch gap-2.5 flex-1 min-w-0 h-full">
-      <span class="text-xs font-bold text-gray-300 uppercase font-mono self-center shrink-0">비교 독:</span>
+      <div class="flex flex-col justify-center shrink-0">
+        <span class="text-xs font-bold text-gray-300 uppercase font-mono">비교 독:</span>
+        <span id="dockSlotOwner" class="text-[10px] text-amber-300 truncate max-w-[90px]">현재 슬롯</span>
+      </div>
       <div id="compareDock" class="flex-1 flex items-stretch gap-2 h-full min-w-0">
         <button data-dock="0" class="dock-btn flex-1 min-w-[70px] h-full rounded-lg border border-[#333] bg-[#181818] hover:border-gray-400 text-gray-300 flex flex-col items-center justify-center transition px-2 overflow-hidden">
           <span class="font-bold text-xs text-gray-400">[1]</span>
@@ -414,6 +425,117 @@
       </button>
     </div>
   </footer>
+
+  <!-- FULL-SCREEN PRE-EXPORT REVIEW VIEW (Hidden until user clicks '🔍 총점검') -->
+  <section id="reviewView" class="hidden flex-1 flex flex-col overflow-hidden bg-[#101010]">
+    <!-- Review Top Bar -->
+    <div class="h-14 border-b border-[#282828] bg-[#161616] px-6 flex items-center justify-between gap-4 shrink-0">
+      <div class="flex items-center gap-3">
+        <button id="btnBackToWorkspace" class="px-3.5 py-1.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#3a3a3a] text-xs font-bold">
+          ← 작업실로 돌아가기
+        </button>
+        <h2 class="text-base font-black text-white">🔍 내보내기 전 최종 총점검</h2>
+        <span id="reviewSummaryCounts" class="text-xs font-mono px-3 py-1 rounded-full bg-[#222] text-emerald-300 border border-[#333]">
+          패스 완료 0 / 30
+        </span>
+      </div>
+      <div class="flex items-center gap-2">
+        <input id="reviewUnityPathInput" type="text" placeholder="Unity 프로젝트 경로 (예: E:/MyGame/)"
+          class="w-60 bg-[#121212] border border-[#383838] text-xs text-white px-3 py-1.5 rounded-lg outline-none focus:border-[#1DB954]">
+        <button id="btnPreviewReceipt" class="px-3.5 py-1.5 rounded-lg bg-[#242424] hover:bg-[#333] text-sky-300 border border-sky-900/60 text-xs font-bold">
+          🧾 영수증 미리보기
+        </button>
+        <button id="btnReviewExportPassed" class="px-4 py-1.5 rounded-lg bg-[#1DB954] hover:bg-[#1ed760] text-black text-xs font-black">
+          🚀 패스 완료 내보내기 & 영수증 저장
+        </button>
+      </div>
+    </div>
+
+    <!-- Review 2-Column Body -->
+    <div class="flex-1 flex overflow-hidden">
+      <!-- Left Column: Unpassed Tasks vs Passed Collection -->
+      <aside class="w-96 border-r border-[#282828] bg-[#161616] flex flex-col shrink-0 overflow-hidden">
+        <div class="flex border-b border-[#282828] text-xs font-bold text-center shrink-0">
+          <button id="revTabTasksBtn" class="flex-1 py-3 border-b-2 border-amber-400 text-amber-300">
+            📋 점검 테스크 (30)
+          </button>
+          <button id="revTabPassedBtn" class="flex-1 py-3 border-b-2 border-transparent text-gray-400 hover:text-white">
+            ✅ 패스 완료함 (0)
+          </button>
+        </div>
+        <div id="reviewChecklist" class="flex-1 overflow-y-auto p-2.5 space-y-2">
+          <!-- Rendered dynamically -->
+        </div>
+      </aside>
+
+      <!-- Right Column: Synced Video+Audio Stage, Receipt Card & Pass/Edit Controls -->
+      <main class="flex-1 overflow-y-auto p-6 flex flex-col items-center justify-between gap-4 bg-gradient-to-b from-[#1a1a1a] to-[#111111]">
+        <div class="w-full max-w-3xl space-y-1 text-center shrink-0">
+          <div class="flex items-center justify-center gap-2">
+            <span id="revSlotBadge" class="text-xs px-2.5 py-0.5 rounded-full bg-[#242424] text-gray-300 font-mono">STATUS</span>
+            <h3 id="revSlotTitle" class="text-xl font-black text-white">점검할 슬롯을 선택하세요</h3>
+          </div>
+          <p id="revSlotMemo" class="text-xs text-gray-400"></p>
+        </div>
+
+        <!-- Video/GIF + Sound Sync Stage -->
+        <div class="w-full max-w-3xl flex-1 min-h-[220px] max-h-[340px] bg-black/50 border border-[#303030] rounded-2xl flex items-center justify-center overflow-hidden relative p-2">
+          <video id="reviewVideo" class="hidden w-full h-full object-contain" muted playsinline></video>
+          <img id="reviewGifImg" class="hidden w-full h-full object-contain" alt="Review Scene">
+          <div id="reviewNoSceneBox" class="text-center text-gray-500 text-sm space-y-1">
+            <div class="text-3xl">🎬</div>
+            <div>첨부된 게임 장면(영상/GIF)이 없습니다 (소리만 점검 재생)</div>
+          </div>
+        </div>
+
+        <!-- Playback & Navigation Bar -->
+        <div class="w-full max-w-3xl flex items-center justify-center gap-3 shrink-0">
+          <button id="btnRevPrev" class="px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838] text-xs font-bold">◀ 이전</button>
+          <button id="btnRevReplay" class="px-6 py-2 rounded-full bg-white hover:bg-gray-200 text-black text-xs font-black shadow-lg">▶ 영상+소리 다시 재생</button>
+          <button id="btnRevStop" class="px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838] text-xs font-bold">⏹ 정지</button>
+          <button id="btnRevNext" class="px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838] text-xs font-bold">다음 ▶</button>
+        </div>
+
+        <!-- Receipt Spec Card & Pass / Edit Decision Buttons -->
+        <div id="reviewReceiptCard" class="w-full max-w-3xl bg-[#181818] border border-[#2f2f2f] rounded-xl p-4 space-y-3 shrink-0">
+          <div class="flex items-center justify-between border-b border-[#2a2a2a] pb-2">
+            <span class="text-xs font-bold text-emerald-400 font-mono">🧾 내보내기 명세서 (영수증 항목)</span>
+            <span id="revOutputPathLabel" class="text-xs font-mono text-gray-400">Assets/Audio/SFX/...</span>
+          </div>
+          <div id="revSpecBody" class="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+            <!-- Populated dynamically -->
+          </div>
+          <div class="flex items-center justify-between gap-2 pt-2 border-t border-[#2a2a2a]">
+            <button id="btnReviewEditInWorkspace" class="px-4 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-amber-300 border border-amber-800/60 text-xs font-bold">
+              🛠️ 불만족 · 작업실에서 수정하기
+            </button>
+            <button id="btnReviewTogglePass" class="px-6 py-2 rounded-lg bg-[#1DB954] hover:bg-[#1ed760] text-black text-xs font-black">
+              ✅ 이상 없음 · 패스 완료함으로 보내기
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <!-- Receipt Viewer Modal (Displayed on preview & after Unity Export) -->
+  <div id="receiptModal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-[#181818] border border-[#383838] rounded-2xl max-w-3xl w-full p-5 shadow-2xl space-y-3 max-h-[88vh] flex flex-col">
+      <div class="flex items-center justify-between border-b border-[#2a2a2a] pb-3 shrink-0">
+        <div class="flex items-center gap-2">
+          <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">🧾 영수증</span>
+          <h3 class="font-bold text-white text-base">SoundReels 최종 확정 · 내보내기 영수증</h3>
+        </div>
+        <button id="btnCloseReceiptModal" class="text-gray-400 hover:text-white text-lg px-2 leading-none">✕</button>
+      </div>
+      <div id="receiptSavedPathNote" class="text-xs font-mono text-emerald-300 hidden"></div>
+      <pre id="receiptTextContent" class="flex-1 overflow-auto bg-[#101010] border border-[#2b2b2b] rounded-xl p-4 text-xs font-mono text-gray-200 whitespace-pre-wrap select-all"></pre>
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-[#2a2a2a] shrink-0">
+        <button id="btnCopyReceiptText" class="px-4 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-white border border-[#383838] text-xs font-bold">📋 영수증 전체 복사</button>
+        <button id="btnCloseReceiptBottom" class="px-4 py-2 rounded-lg bg-[#1DB954] text-black text-xs font-black">확인</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Source & AI Provenance Modal -->
   <div id="sourceInfoModal" class="hidden fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -512,6 +634,6 @@
   <!-- Hidden Native Audio Element -->
   <audio id="audioPlayer"></audio>
 
-  <script src="app.js?v=1.9"></script>
+  <script src="app.js?v=2.0"></script>
 </body>
 </html>

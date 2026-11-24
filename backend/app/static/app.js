@@ -4,12 +4,26 @@
 
 let allSlots = [];
 let currentCategory = "all";
-let showConfirmedOnly = false;
+let slotFilterMode = "all"; // 'all' | 'liked' | 'confirmed'
 let currentSlot = null;
 let currentCandidates = [];
 let currentIndex = -1;
 let similarAnchorSoundId = null;
-let compareDock = [null, null, null, null, null];
+const slotCompareDocks = {}; // { [slotId]: [sound|null, ...] }
+
+// Full-Screen Pre-Export Review Mode State
+let isReviewMode = false;
+let reviewTab = "tasks"; // 'tasks' | 'passed'
+let reviewSelectedSlotId = null;
+let reviewOffsetTimer = null;
+
+function getActiveCompareDock() {
+  if (!currentSlot) return [null, null, null, null, null];
+  if (!slotCompareDocks[currentSlot.id]) {
+    slotCompareDocks[currentSlot.id] = [null, null, null, null, null];
+  }
+  return slotCompareDocks[currentSlot.id];
+}
 
 // Loop Modes: 'sync' (Scene+Audio Sync Loop) | 'audio' (Audio-Only Loop) | 'once' (1x then Next)
 let loopMode = "sync";
@@ -1510,6 +1524,8 @@ async function selectSlot(slotId, autoPlay = true) {
     currentCandidates = data.candidates || [];
     loadingSpinner.classList.add("hidden");
 
+    // Sync this slot's isolated Compare Dock [1~5] strictly with THIS slot's liked candidates!
+    syncActiveSlotCompareDockFromCandidates();
     renderCandidatesQueue();
     renderSlotsList();
 
@@ -1652,7 +1668,8 @@ function renderSlotsList() {
   container.innerHTML = "";
 
   const filtered = allSlots.filter(s => {
-    if (showConfirmedOnly && s.status !== "confirmed") return false;
+    if (slotFilterMode === "confirmed" && s.status !== "confirmed") return false;
+    if (slotFilterMode === "liked" && !(s.liked_count > 0)) return false;
     if (currentCategory !== "all" && s.category !== currentCategory) return false;
     const searchVal = document.getElementById("searchInput").value.toLowerCase();
     if (searchVal && !s.name.toLowerCase().includes(searchVal) && !s.memo.toLowerCase().includes(searchVal)) return false;
@@ -1660,7 +1677,10 @@ function renderSlotsList() {
   });
 
   if (filtered.length === 0) {
-    container.innerHTML = `<div class="text-center text-gray-500 text-xs py-8">${showConfirmedOnly ? "확정 완료된 항목이 아직 없습니다." : "표시할 슬롯이 없습니다."}</div>`;
+    const emptyMsg = slotFilterMode === "confirmed"
+      ? "확정 완료된 항목이 아직 없습니다."
+      : (slotFilterMode === "liked" ? "찜해둔 후보가 있는 슬롯이 아직 없습니다." : "표시할 슬롯이 없습니다.");
+    container.innerHTML = `<div class="text-center text-gray-500 text-xs py-8">${emptyMsg}</div>`;
     return;
   }
 
@@ -1668,34 +1688,45 @@ function renderSlotsList() {
     const item = document.createElement("div");
     const isActive = currentSlot && currentSlot.id === s.id;
     const isConfirmed = s.status === "confirmed";
+    const isPassed = !!s.review_passed;
+    const likedCount = Number(s.liked_count || 0);
 
     let cardStyle = isActive ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#202020]";
     if (isConfirmed) {
       cardStyle = isActive
         ? "active border-l-4 border-[#1DB954] bg-emerald-900/45 ring-1 ring-[#1DB954]"
         : "border-l-4 border-[#1DB954] bg-emerald-950/35 hover:bg-emerald-950/55";
+    } else if (likedCount > 0) {
+      cardStyle = isActive
+        ? "active border-l-4 border-amber-400 bg-amber-950/35"
+        : "border-l-4 border-amber-500/70 bg-[#1a1812] hover:bg-[#222018]";
     }
     item.className = `slot-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-[13px] transition ${cardStyle}`;
 
-    let statusBadge = "";
-    if (isConfirmed) {
-      statusBadge = `<span class="bg-[#1DB954] text-black text-[11px] px-2.5 py-0.5 rounded-full font-black">✅ 확정</span>`;
+    const badges = [];
+    if (likedCount > 0) {
+      badges.push(`<span class="bg-amber-950/80 text-amber-300 border border-amber-700/70 text-[10px] px-1.5 py-0.5 rounded-full font-bold">⭐ 찜${likedCount}</span>`);
+    }
+    if (isPassed) {
+      badges.push(`<span class="bg-[#1DB954] text-black text-[11px] px-2 py-0.5 rounded-full font-black">✅ 패스</span>`);
+    } else if (isConfirmed) {
+      badges.push(`<span class="bg-[#1DB954] text-black text-[11px] px-2 py-0.5 rounded-full font-black">✅ 확정</span>`);
     } else if (s.status === "on_hold") {
-      statusBadge = `<span class="bg-[#242424] text-gray-500 text-xs px-2 py-0.5 rounded">보류</span>`;
+      badges.push(`<span class="bg-[#242424] text-gray-500 text-xs px-2 py-0.5 rounded">보류</span>`);
     } else if (s.candidate_count > 0) {
-      statusBadge = `<span class="bg-[#242424] text-gray-300 text-xs px-2 py-0.5 rounded font-mono">${s.candidate_count} 후보</span>`;
+      badges.push(`<span class="bg-[#242424] text-gray-300 text-xs px-2 py-0.5 rounded font-mono">${s.candidate_count} 후보</span>`);
     } else {
-      statusBadge = `<span class="bg-[#242424] text-gray-500 text-xs px-2 py-0.5 rounded">탐색 중</span>`;
+      badges.push(`<span class="bg-[#242424] text-gray-500 text-xs px-2 py-0.5 rounded">탐색 중</span>`);
     }
 
     const sceneIcon = s.scene_media_url ? "🎬 " : "";
-    const titleColor = isConfirmed ? "text-emerald-300" : "text-gray-200";
+    const titleColor = isConfirmed ? "text-emerald-300" : (likedCount > 0 ? "text-amber-200" : "text-gray-200");
     item.innerHTML = `
       <div class="truncate flex-1 pr-2 min-w-0">
         <div class="font-bold ${titleColor} truncate">${isConfirmed ? "✅ " : ""}${sceneIcon}${s.name}</div>
         <div class="text-xs text-gray-400 truncate">${s.memo}</div>
       </div>
-      <div class="shrink-0">${statusBadge}</div>
+      <div class="shrink-0 flex items-center gap-1">${badges.join("")}</div>
     `;
 
     item.addEventListener("click", () => selectSlot(s.id));
@@ -1822,7 +1853,7 @@ btnLoopMode.addEventListener("click", cycleLoopMode);
 // =========================================================================
 
 async function toggleLikeCurrent() {
-  if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
+  if (currentIndex < 0 || !currentCandidates[currentIndex] || !currentSlot) return;
   const cand = currentCandidates[currentIndex];
 
   try {
@@ -1833,35 +1864,88 @@ async function toggleLikeCurrent() {
     });
     const data = await res.json();
     cand.candidate_status = data.new_candidate_status;
-    if (cand.candidate_status === "liked") addToCompareDock(cand);
+    if (cand.candidate_status === "liked") {
+      addToCompareDock(cand);
+    } else {
+      removeFromCompareDock(cand.sound_id);
+    }
+    currentSlot.liked_count = currentCandidates.filter(c => c.candidate_status === "liked").length;
     renderCandidatesQueue();
+    renderSlotsList();
     playCandidate(currentIndex);
   } catch (e) {
     console.error("Like error:", e);
   }
 }
 
+function syncActiveSlotCompareDockFromCandidates() {
+  if (!currentSlot) return;
+  const dock = [null, null, null, null, null];
+  const prevDock = slotCompareDocks[currentSlot.id] || [];
+  const candMap = new Map(currentCandidates.map(c => [c.sound_id, c]));
+
+  // Keep existing dock order for liked sounds still in this slot
+  let writeIdx = 0;
+  for (const prev of prevDock) {
+    if (prev && candMap.has(prev.sound_id)) {
+      const fresh = candMap.get(prev.sound_id);
+      if (fresh.candidate_status === "liked" && writeIdx < 5) {
+        dock[writeIdx++] = fresh;
+      }
+    }
+  }
+  // Fill remaining liked sounds of this slot
+  for (const c of currentCandidates) {
+    if (writeIdx >= 5) break;
+    if (c.candidate_status === "liked" && !dock.some(d => d && d.sound_id === c.sound_id)) {
+      dock[writeIdx++] = c;
+    }
+  }
+  slotCompareDocks[currentSlot.id] = dock;
+  updateCompareDockUI();
+}
+
 function addToCompareDock(sound) {
-  const existingIdx = compareDock.findIndex(s => s && s.sound_id === sound.sound_id);
-  if (existingIdx !== -1) return;
-  const emptyIdx = compareDock.findIndex(s => s === null);
-  if (emptyIdx !== -1) compareDock[emptyIdx] = sound;
+  if (!currentSlot || !sound) return;
+  const dock = getActiveCompareDock();
+  const existingIdx = dock.findIndex(s => s && s.sound_id === sound.sound_id);
+  if (existingIdx !== -1) {
+    dock[existingIdx] = sound;
+    updateCompareDockUI();
+    return;
+  }
+  const emptyIdx = dock.findIndex(s => s === null);
+  if (emptyIdx !== -1) dock[emptyIdx] = sound;
   else {
-    compareDock.shift();
-    compareDock.push(sound);
+    dock.shift();
+    dock.push(sound);
+  }
+  updateCompareDockUI();
+}
+
+function removeFromCompareDock(soundId) {
+  if (!currentSlot) return;
+  const dock = getActiveCompareDock();
+  for (let i = 0; i < dock.length; i++) {
+    if (dock[i] && dock[i].sound_id === soundId) {
+      dock[i] = null;
+    }
   }
   updateCompareDockUI();
 }
 
 function updateCompareDockUI() {
+  const dock = getActiveCompareDock();
+  const ownerEl = document.getElementById("dockSlotOwner");
+  if (ownerEl) ownerEl.textContent = currentSlot ? currentSlot.name : "현재 슬롯";
   const dockBtns = document.querySelectorAll(".dock-btn");
   dockBtns.forEach((btn, idx) => {
-    const s = compareDock[idx];
+    const s = dock[idx];
     const spanText = btn.querySelector("span:last-child");
     if (s) {
       spanText.textContent = s.name;
       spanText.classList.add("text-emerald-400");
-      btn.title = `${s.name} (${idx + 1}번 키)`;
+      btn.title = `[${currentSlot ? currentSlot.name : ""}] ${s.name} (${idx + 1}번 키)`;
     } else {
       spanText.textContent = "비어있음";
       spanText.classList.remove("text-emerald-400");
@@ -1980,6 +2064,7 @@ async function unconfirmCurrent() {
         });
       }
       currentSlot.status = data.new_slot_status || "has_candidates";
+      if (currentSlot.status !== "confirmed") currentSlot.review_passed = false;
       updateConfirmButtonUI(cand);
       renderCandidatesQueue();
       renderSlotsList();
@@ -2040,7 +2125,7 @@ document.getElementById("btnUnityExport").addEventListener("click", async () => 
     });
     const data = await res.json();
     if (res.ok) {
-      alert(`[내보내기 완료!] 총 ${data.exported_count}개의 확정 사운드가 설정한 트림 구간 및 -1dBFS 마스터링 WAV로 복사되었으며 CREDITS.txt가 작성되었습니다.`);
+      openReceiptModal(data.receipt_text || "", `저장 위치: ${data.receipt_path || unityPath} (총 ${data.exported_count}개 WAV 내보냄)`);
     } else {
       alert(`내보내기 실패: ${data.detail || "오류 발생"}`);
     }
@@ -2074,6 +2159,7 @@ audioPlayer.addEventListener("pause", () => {
 });
 
 audioPlayer.addEventListener("ended", () => {
+  if (isReviewMode) return;
   if (loopMode === "audio" || (loopMode === "sync" && !sceneMediaType)) {
     audioPlayer.currentTime = audioIn;
     audioPlayer.play().catch(() => {});
@@ -2172,18 +2258,40 @@ document.getElementById("btnSimilar").addEventListener("click", triggerSimilarCu
 document.getElementById("btnMutate").addEventListener("click", triggerMutateCurrent);
 document.getElementById("btnConfirm").addEventListener("click", confirmCurrent);
 
+const btnFilterLiked = document.getElementById("btnFilterLiked");
 const btnFilterConfirmed = document.getElementById("btnFilterConfirmed");
+
+function updateSlotFilterButtonsUI() {
+  if (btnFilterLiked) {
+    const active = slotFilterMode === "liked";
+    btnFilterLiked.className = active
+      ? "px-2 py-0.5 rounded-full bg-amber-400 text-black border border-amber-400 text-[11px] font-black transition"
+      : "px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-amber-300 border border-[#383838] text-[11px] font-semibold transition";
+    btnFilterLiked.textContent = active ? "⭐ 찜만 중" : "⭐ 찜만";
+  }
+  if (btnFilterConfirmed) {
+    const active = slotFilterMode === "confirmed";
+    btnFilterConfirmed.className = active
+      ? "px-2 py-0.5 rounded-full bg-[#1DB954] text-black border border-[#1DB954] text-[11px] font-black transition"
+      : "px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838] text-[11px] font-semibold transition";
+    btnFilterConfirmed.textContent = active ? "✅ 확정만 중" : "✅ 확정만";
+  }
+}
+
+if (btnFilterLiked) {
+  btnFilterLiked.addEventListener("click", () => {
+    slotFilterMode = slotFilterMode === "liked" ? "all" : "liked";
+    updateSlotFilterButtonsUI();
+    document.getElementById("tabSlotsBtn").click();
+    renderSlotsList();
+  });
+}
+
 if (btnFilterConfirmed) {
   btnFilterConfirmed.addEventListener("click", () => {
-    showConfirmedOnly = !showConfirmedOnly;
-    if (showConfirmedOnly) {
-      btnFilterConfirmed.className = "px-2 py-0.5 rounded-full bg-[#1DB954] text-black border border-[#1DB954] text-[11px] font-black transition";
-      btnFilterConfirmed.textContent = "✅ 확정만 보기 중";
-      document.getElementById("tabSlotsBtn").click();
-    } else {
-      btnFilterConfirmed.className = "px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838] text-[11px] font-semibold transition";
-      btnFilterConfirmed.textContent = "확정만 보기";
-    }
+    slotFilterMode = slotFilterMode === "confirmed" ? "all" : "confirmed";
+    updateSlotFilterButtonsUI();
+    document.getElementById("tabSlotsBtn").click();
     renderSlotsList();
   });
 }
@@ -2462,7 +2570,7 @@ document.getElementById("searchInput").addEventListener("input", renderSlotsList
 document.querySelectorAll(".dock-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     const idx = parseInt(btn.dataset.dock, 10);
-    const sound = compareDock[idx];
+    const sound = getActiveCompareDock()[idx];
     if (sound) {
       document.querySelectorAll(".dock-btn").forEach(b => b.classList.remove("active", "border-[#1DB954]"));
       btn.classList.add("active", "border-[#1DB954]");
@@ -2633,6 +2741,433 @@ if (document.getElementById("btnSaveSettingsModal")) {
   });
 }
 
+// =========================================================================
+// Full-Screen Pre-Export Review Mode (#reviewView) & Receipt Viewer Modal
+// =========================================================================
+
+const workspaceView = document.getElementById("workspaceView");
+const bottomResizerEl = document.getElementById("bottomResizer");
+const bottomFooterEl = document.getElementById("bottomFooter");
+const reviewView = document.getElementById("reviewView");
+const reviewUnityPathInput = document.getElementById("reviewUnityPathInput");
+const reviewChecklist = document.getElementById("reviewChecklist");
+const revTabTasksBtn = document.getElementById("revTabTasksBtn");
+const revTabPassedBtn = document.getElementById("revTabPassedBtn");
+const reviewSummaryCounts = document.getElementById("reviewSummaryCounts");
+const revSlotBadge = document.getElementById("revSlotBadge");
+const revSlotTitle = document.getElementById("revSlotTitle");
+const revSlotMemo = document.getElementById("revSlotMemo");
+const reviewVideo = document.getElementById("reviewVideo");
+const reviewGifImg = document.getElementById("reviewGifImg");
+const reviewNoSceneBox = document.getElementById("reviewNoSceneBox");
+const revOutputPathLabel = document.getElementById("revOutputPathLabel");
+const revSpecBody = document.getElementById("revSpecBody");
+const btnReviewTogglePass = document.getElementById("btnReviewTogglePass");
+const btnReviewEditInWorkspace = document.getElementById("btnReviewEditInWorkspace");
+const receiptModal = document.getElementById("receiptModal");
+const receiptTextContent = document.getElementById("receiptTextContent");
+const receiptSavedPathNote = document.getElementById("receiptSavedPathNote");
+
+function openReceiptModal(text, pathNote = "") {
+  if (!receiptModal) return;
+  receiptTextContent.textContent = text || "(내용 없음)";
+  if (pathNote) {
+    receiptSavedPathNote.textContent = `📄 ${pathNote}`;
+    receiptSavedPathNote.classList.remove("hidden");
+  } else {
+    receiptSavedPathNote.classList.add("hidden");
+  }
+  receiptModal.classList.remove("hidden");
+}
+
+function closeReceiptModal() {
+  if (receiptModal) receiptModal.classList.add("hidden");
+}
+
+if (document.getElementById("btnCloseReceiptModal")) {
+  document.getElementById("btnCloseReceiptModal").addEventListener("click", closeReceiptModal);
+}
+if (document.getElementById("btnCloseReceiptBottom")) {
+  document.getElementById("btnCloseReceiptBottom").addEventListener("click", closeReceiptModal);
+}
+if (receiptModal) {
+  receiptModal.addEventListener("click", (e) => {
+    if (e.target === receiptModal) closeReceiptModal();
+  });
+}
+if (document.getElementById("btnCopyReceiptText")) {
+  document.getElementById("btnCopyReceiptText").addEventListener("click", (e) => {
+    copyTextToClipboard(receiptTextContent.textContent, e.currentTarget);
+  });
+}
+
+function stopReviewPlayback() {
+  if (reviewOffsetTimer) {
+    clearTimeout(reviewOffsetTimer);
+    reviewOffsetTimer = null;
+  }
+  audioPlayer.pause();
+  if (reviewVideo) reviewVideo.pause();
+}
+
+function getReviewListForActiveTab() {
+  if (reviewTab === "passed") {
+    return allSlots.filter(s => !!s.review_passed);
+  }
+  // Pending/Task tab: show Confirmed-needing-pass FIRST, then Liked-only, then remaining unpassed slots
+  return allSlots
+    .filter(s => !s.review_passed)
+    .sort((a, b) => {
+      const rank = (s) => (s.status === "confirmed" ? 0 : (s.liked_count > 0 ? 1 : 2));
+      return rank(a) - rank(b);
+    });
+}
+
+function renderReviewChecklist() {
+  if (!reviewChecklist) return;
+  const tasksList = allSlots.filter(s => !s.review_passed);
+  const passedList = allSlots.filter(s => !!s.review_passed);
+
+  if (revTabTasksBtn) revTabTasksBtn.textContent = `📋 점검 테스크 (${tasksList.length})`;
+  if (revTabPassedBtn) revTabPassedBtn.textContent = `✅ 패스 완료함 (${passedList.length})`;
+  if (reviewSummaryCounts) reviewSummaryCounts.textContent = `패스 완료 ${passedList.length} / ${allSlots.length}`;
+
+  if (revTabTasksBtn && revTabPassedBtn) {
+    if (reviewTab === "tasks") {
+      revTabTasksBtn.className = "flex-1 py-3 border-b-2 border-amber-400 text-amber-300";
+      revTabPassedBtn.className = "flex-1 py-3 border-b-2 border-transparent text-gray-400 hover:text-white";
+    } else {
+      revTabPassedBtn.className = "flex-1 py-3 border-b-2 border-[#1DB954] text-[#1DB954]";
+      revTabTasksBtn.className = "flex-1 py-3 border-b-2 border-transparent text-gray-400 hover:text-white";
+    }
+  }
+
+  const list = getReviewListForActiveTab();
+  reviewChecklist.innerHTML = "";
+  if (list.length === 0) {
+    reviewChecklist.innerHTML = `<div class="text-center text-gray-500 text-xs py-10">${reviewTab === "passed" ? "패스 완료된 슬롯이 아직 없습니다." : "모든 슬롯을 패스 완료했습니다! 🎉"}</div>`;
+    return;
+  }
+
+  list.forEach(s => {
+    const isSel = s.id === reviewSelectedSlotId;
+    const isConfirmed = s.status === "confirmed";
+    const row = document.createElement("div");
+    let borderCls = "border-[#2a2a2a] bg-[#1c1c1c] hover:bg-[#242424]";
+    if (s.review_passed) {
+      borderCls = isSel
+        ? "border-[#1DB954] bg-emerald-950/60 ring-1 ring-[#1DB954]"
+        : "border-emerald-800/70 bg-emerald-950/30 hover:bg-emerald-950/45";
+    } else if (isConfirmed) {
+      borderCls = isSel
+        ? "border-amber-400 bg-amber-950/40 ring-1 ring-amber-400"
+        : "border-amber-800/60 bg-[#1f1e18] hover:bg-[#26241b]";
+    } else if (isSel) {
+      borderCls = "border-gray-400 bg-[#2a2a2a]";
+    }
+    row.className = `p-3 rounded-xl border cursor-pointer transition space-y-1 ${borderCls}`;
+
+    const statePill = s.review_passed
+      ? `<span class="bg-[#1DB954] text-black text-[10px] px-2 py-0.5 rounded-full font-black">✅ 패스됨</span>`
+      : (isConfirmed
+          ? `<span class="bg-amber-400 text-black text-[10px] px-2 py-0.5 rounded-full font-black">점검 대기</span>`
+          : `<span class="bg-[#2c2c2c] text-gray-400 text-[10px] px-2 py-0.5 rounded-full">⚠️ 미확정</span>`);
+
+    const sndLabel = s.confirmed_sound
+      ? `🔊 ${s.confirmed_sound.name}`
+      : (s.liked_count > 0 ? `⭐ 찜 후보 ${s.liked_count}개` : "확정된 소리 없음");
+
+    row.innerHTML = `
+      <div class="flex items-center justify-between gap-2">
+        <span class="font-bold text-xs text-white truncate">${s.scene_media_url ? "🎬 " : ""}${s.name}</span>
+        ${statePill}
+      </div>
+      <div class="text-[11px] text-gray-400 truncate">${sndLabel}</div>
+    `;
+    row.addEventListener("click", () => selectReviewSlot(s.id, true));
+    reviewChecklist.appendChild(row);
+  });
+}
+
+function selectReviewSlot(slotId, autoPlay = true) {
+  const slot = allSlots.find(s => s.id === slotId);
+  if (!slot) return;
+  reviewSelectedSlotId = slot.id;
+  stopReviewPlayback();
+  renderReviewChecklist();
+
+  revSlotTitle.textContent = slot.name;
+  revSlotMemo.textContent = slot.memo || "";
+  if (slot.review_passed) {
+    revSlotBadge.textContent = "✅ 패스 완료";
+    revSlotBadge.className = "text-xs px-2.5 py-0.5 rounded-full bg-[#1DB954] text-black font-black font-mono";
+  } else if (slot.status === "confirmed") {
+    revSlotBadge.textContent = "🔎 확정됨 · 점검 대기";
+    revSlotBadge.className = "text-xs px-2.5 py-0.5 rounded-full bg-amber-950 text-amber-300 border border-amber-700 font-bold font-mono";
+  } else {
+    revSlotBadge.textContent = "⚠️ 미확정 (작업 필요)";
+    revSlotBadge.className = "text-xs px-2.5 py-0.5 rounded-full bg-red-950/60 text-red-300 border border-red-800 font-bold font-mono";
+  }
+
+  // Scene Media Display
+  reviewVideo.classList.add("hidden");
+  reviewVideo.removeAttribute("src");
+  reviewGifImg.classList.add("hidden");
+  reviewGifImg.removeAttribute("src");
+  reviewNoSceneBox.classList.add("hidden");
+
+  if (slot.scene_media_url) {
+    if (slot.scene_media_type === "video") {
+      reviewVideo.src = slot.scene_media_url;
+      reviewVideo.currentTime = slot.scene_in || 0.0;
+      reviewVideo.classList.remove("hidden");
+    } else {
+      reviewGifImg.src = slot.scene_media_url;
+      reviewGifImg.classList.remove("hidden");
+    }
+  } else {
+    reviewNoSceneBox.classList.remove("hidden");
+  }
+
+  // Receipt Card & Pass Button
+  const cs = slot.confirmed_sound;
+  revOutputPathLabel.textContent = `Assets/Audio/SFX/${slot.id}/${slot.id}_01.wav`;
+  if (cs) {
+    const srcLabel = cs.source_kind === "ai_generated"
+      ? "🤖 AI / 로컬 자체 생성 (출처 표기 불필요)"
+      : (cs.source_kind === "ai_mutated"
+          ? `🎲 AI 변형 (${cs.original_source_url || ""})`
+          : `🌐 ${cs.original_source_url || cs.catalog_url || "CC0"}`);
+    const trimEnd = cs.audio_out > cs.audio_in ? cs.audio_out : cs.duration;
+    const hasTrim = (cs.audio_in > 0) || (cs.audio_out > 0);
+    const trimStr = hasTrim ? `${Number(cs.audio_in).toFixed(2)}s ~ ${Number(trimEnd).toFixed(2)}s` : `전체 자동 무음제거 (${Number(cs.duration).toFixed(2)}s)`;
+    const rate = Number(cs.playback_rate || 1.0);
+    const rateStr = `${rate.toFixed(2)}x (${cs.preserve_pitch ? "피치유지" : "피치연동"})`;
+
+    revSpecBody.innerHTML = `
+      <div><span class="text-gray-400">확정 음원:</span> <span class="text-white font-bold">${cs.name}</span></div>
+      <div><span class="text-gray-400">라이선스:</span> <span class="text-emerald-300 font-semibold">${cs.license_type} · ${cs.author}</span></div>
+      <div class="col-span-2 truncate"><span class="text-gray-400">원본 출처:</span> <span class="text-sky-300 font-mono">${srcLabel}</span></div>
+      <div><span class="text-gray-400">자르기 구간:</span> <span class="text-gray-200 font-mono">${trimStr}</span></div>
+      <div><span class="text-gray-400">배속 / 피치:</span> <span class="text-amber-300 font-mono font-bold">${rateStr}</span></div>
+    `;
+    btnReviewTogglePass.disabled = false;
+    if (slot.review_passed) {
+      btnReviewTogglePass.className = "px-5 py-2 rounded-lg bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-700 text-xs font-black";
+      btnReviewTogglePass.textContent = "↩ 불만족 · 점검 테스크로 되돌리기";
+    } else {
+      btnReviewTogglePass.className = "px-6 py-2 rounded-lg bg-[#1DB954] hover:bg-[#1ed760] text-black text-xs font-black";
+      btnReviewTogglePass.textContent = "✅ 이상 없음 · 패스 완료함으로 보내기";
+    }
+  } else {
+    revSpecBody.innerHTML = `<div class="col-span-2 text-amber-300">아직 확정된 사운드가 없습니다. '🛠️ 작업실에서 수정하기'를 눌러 사운드를 확정한 뒤 패스해 주세요.</div>`;
+    btnReviewTogglePass.disabled = true;
+    btnReviewTogglePass.className = "px-5 py-2 rounded-lg bg-[#242424] text-gray-500 border border-[#333] text-xs font-bold cursor-not-allowed";
+    btnReviewTogglePass.textContent = "✅ 확정 후 패스 가능";
+  }
+
+  if (autoPlay && cs) {
+    playReviewSynced();
+  }
+}
+
+function playReviewSynced() {
+  const slot = allSlots.find(s => s.id === reviewSelectedSlotId);
+  if (!slot) return;
+  stopReviewPlayback();
+
+  if (slot.scene_media_url) {
+    if (slot.scene_media_type === "video") {
+      reviewVideo.currentTime = slot.scene_in || 0.0;
+      reviewVideo.play().catch(() => {});
+    } else {
+      // Restart GIF cleanly from frame 0
+      const baseSrc = slot.scene_media_url;
+      reviewGifImg.src = "";
+      reviewGifImg.src = baseSrc;
+    }
+  }
+
+  const cs = slot.confirmed_sound;
+  if (!cs) return;
+  initAudioContext();
+  currentNormGain = Number(cs.norm_gain || 1.0);
+  applyAudioGainNodes();
+  currentPlaybackRate = Number(cs.playback_rate || 1.0);
+  currentPreservePitch = cs.preserve_pitch !== 0;
+  applyAudioPlaybackSpeed();
+  audioIn = Number(cs.audio_in || 0.0);
+  audioOut = Number(cs.audio_out || 0.0) || Number(cs.duration || 10.0);
+
+  audioPlayer.src = `/api/sounds/${cs.sound_id}/audio`;
+  const triggerSnd = () => {
+    applyAudioPlaybackSpeed();
+    audioPlayer.currentTime = audioIn;
+    audioPlayer.play().catch(() => {});
+  };
+  const offsetMs = Math.max(0, Number(slot.sound_offset || 0.0) * 1000);
+  audioPlayer.onloadedmetadata = () => {
+    if (offsetMs > 10) {
+      reviewOffsetTimer = setTimeout(triggerSnd, offsetMs);
+    } else {
+      triggerSnd();
+    }
+  };
+  audioPlayer.load();
+}
+
+function navigateReviewSlot(delta) {
+  const list = getReviewListForActiveTab();
+  if (list.length === 0) return;
+  const idx = list.findIndex(s => s.id === reviewSelectedSlotId);
+  const nextIdx = idx < 0 ? 0 : Math.max(0, Math.min(list.length - 1, idx + delta));
+  selectReviewSlot(list[nextIdx].id, true);
+}
+
+async function switchToReviewView() {
+  stopReviewPlayback();
+  audioPlayer.pause();
+  sceneIsPlaying = false;
+  if (sceneVideo) sceneVideo.pause();
+
+  isReviewMode = true;
+  if (reviewUnityPathInput && unityPathInput) {
+    reviewUnityPathInput.value = unityPathInput.value;
+  }
+  workspaceView.classList.add("hidden");
+  if (bottomResizerEl) bottomResizerEl.classList.add("hidden");
+  if (bottomFooterEl) bottomFooterEl.classList.add("hidden");
+  reviewView.classList.remove("hidden");
+
+  await loadSlots();
+  renderReviewChecklist();
+  const list = getReviewListForActiveTab();
+  if (list.length > 0) {
+    selectReviewSlot(list[0].id, false);
+  }
+}
+
+function switchToWorkspaceView(targetSlotId = null) {
+  stopReviewPlayback();
+  isReviewMode = false;
+  reviewView.classList.add("hidden");
+  workspaceView.classList.remove("hidden");
+  if (bottomResizerEl) bottomResizerEl.classList.remove("hidden");
+  if (bottomFooterEl) bottomFooterEl.classList.remove("hidden");
+  resizeWaveformCanvas();
+  if (targetSlotId) {
+    selectSlot(targetSlotId, false);
+  }
+}
+
+if (document.getElementById("btnOpenReviewView")) {
+  document.getElementById("btnOpenReviewView").addEventListener("click", switchToReviewView);
+}
+if (document.getElementById("btnBackToWorkspace")) {
+  document.getElementById("btnBackToWorkspace").addEventListener("click", () => switchToWorkspaceView());
+}
+if (revTabTasksBtn) {
+  revTabTasksBtn.addEventListener("click", () => {
+    reviewTab = "tasks";
+    renderReviewChecklist();
+    const list = getReviewListForActiveTab();
+    if (list.length > 0) selectReviewSlot(list[0].id, false);
+  });
+}
+if (revTabPassedBtn) {
+  revTabPassedBtn.addEventListener("click", () => {
+    reviewTab = "passed";
+    renderReviewChecklist();
+    const list = getReviewListForActiveTab();
+    if (list.length > 0) selectReviewSlot(list[0].id, false);
+  });
+}
+if (document.getElementById("btnRevReplay")) {
+  document.getElementById("btnRevReplay").addEventListener("click", playReviewSynced);
+}
+if (document.getElementById("btnRevStop")) {
+  document.getElementById("btnRevStop").addEventListener("click", stopReviewPlayback);
+}
+if (document.getElementById("btnRevPrev")) {
+  document.getElementById("btnRevPrev").addEventListener("click", () => navigateReviewSlot(-1));
+}
+if (document.getElementById("btnRevNext")) {
+  document.getElementById("btnRevNext").addEventListener("click", () => navigateReviewSlot(1));
+}
+if (btnReviewEditInWorkspace) {
+  btnReviewEditInWorkspace.addEventListener("click", () => {
+    const sid = reviewSelectedSlotId;
+    switchToWorkspaceView(sid);
+  });
+}
+if (btnReviewTogglePass) {
+  btnReviewTogglePass.addEventListener("click", async () => {
+    const slot = allSlots.find(s => s.id === reviewSelectedSlotId);
+    if (!slot) return;
+    const nextPassed = !slot.review_passed;
+    try {
+      const res = await fetch(`/api/slots/${slot.id}/review_pass`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passed: nextPassed }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.detail || "패스 처리 실패");
+        return;
+      }
+      slot.review_passed = !!data.review_passed;
+      renderSlotsList();
+      renderReviewChecklist();
+      const remaining = getReviewListForActiveTab();
+      if (remaining.length > 0) {
+        selectReviewSlot(remaining[0].id, false);
+      } else {
+        selectReviewSlot(slot.id, false);
+      }
+    } catch (e) {
+      alert(`오류: ${e}`);
+    }
+  });
+}
+if (document.getElementById("btnPreviewReceipt")) {
+  document.getElementById("btnPreviewReceipt").addEventListener("click", async () => {
+    const hasPassed = allSlots.some(s => s.review_passed);
+    const res = await fetch(`/api/export/receipt_preview?passed_only=${hasPassed}`);
+    const data = await res.json();
+    openReceiptModal(data.receipt_text, hasPassed ? "총점검 패스 완료 항목 기준 미리보기" : "전체 확정 완료 항목 기준 미리보기");
+  });
+}
+if (document.getElementById("btnReviewExportPassed")) {
+  document.getElementById("btnReviewExportPassed").addEventListener("click", async () => {
+    const pathVal = (reviewUnityPathInput?.value || unityPathInput?.value || "").trim();
+    if (!pathVal) {
+      alert("상단 입력란에 Unity 프로젝트 경로를 입력해주세요. (예: E:/MyGame/)");
+      if (reviewUnityPathInput) reviewUnityPathInput.focus();
+      return;
+    }
+    unityPathInput.value = pathVal;
+    saveSetting("unity_path", pathVal);
+
+    const hasPassed = allSlots.some(s => s.review_passed);
+    try {
+      const res = await fetch("/api/export/batch_unity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unity_project_path: pathVal, passed_only: hasPassed }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        openReceiptModal(data.receipt_text, `영수증 파일 저장됨: ${data.receipt_path} (${data.exported_count}개 WAV 내보내기 완료)`);
+      } else {
+        alert(`내보내기 실패: ${data.detail || "오류 발생"}`);
+      }
+    } catch (e) {
+      alert(`내보내기 오류: ${e}`);
+    }
+  });
+}
+
 function isTextEditingTarget(target) {
   if (!target) return false;
   if (target.isContentEditable || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return true;
@@ -2673,13 +3208,36 @@ window.addEventListener("keydown", (e) => {
   }
 
   if (e.key === "Escape") {
+    closeReceiptModal();
     closeSettingsModal();
     closeSourceInfoModal();
     return;
   }
 
+  if (receiptModal && !receiptModal.classList.contains("hidden")) return;
   if (settingsModal && !settingsModal.classList.contains("hidden")) return;
   if (isTextEditingTarget(e.target)) return;
+
+  if (isReviewMode) {
+    if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      e.preventDefault();
+      navigateReviewSlot(-1);
+    } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      e.preventDefault();
+      navigateReviewSlot(1);
+    } else if (e.key === " " || e.code === "Space") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) {
+        if (!audioPlayer.paused) stopReviewPlayback();
+        else playReviewSynced();
+      }
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (btnReviewTogglePass && !btnReviewTogglePass.disabled) btnReviewTogglePass.click();
+    }
+    return;
+  }
 
   const code = e.code || e.key;
   const k = keymapSettings.keys;
