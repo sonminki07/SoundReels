@@ -4,6 +4,7 @@ import json
 import re
 import time
 import shutil
+import threading
 import subprocess
 import webbrowser
 import urllib.parse
@@ -32,6 +33,18 @@ from backend.app.core.db import (
     AUDIO_CACHE_DIR,
     SCENE_CACHE_DIR,
 )
+from backend.app.services.loudness import compute_norm_gain
+
+_scout_instance = None
+_scout_lock = threading.Lock()
+
+def get_scout():
+    global _scout_instance
+    with _scout_lock:
+        if _scout_instance is None:
+            from backend.app.services.sound_scout import SoundScout
+            _scout_instance = SoundScout(device="cuda")
+    return _scout_instance
 
 app = FastAPI(title="SoundReels API", version="1.2.0")
 
@@ -182,19 +195,32 @@ def get_projects():
     return {"projects": projects}
 
 @app.get("/api/slots")
-def get_slots():
+def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
     with get_db_context() as conn:
         c = conn.cursor()
-        c.execute("""
-        SELECT s.*, 
-               COUNT(sc.id) as candidate_count,
-               SUM(CASE WHEN sc.status = 'liked' THEN 1 ELSE 0 END) as liked_count,
-               SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count
-        FROM slots s
-        LEFT JOIN slot_candidates sc ON s.id = sc.slot_id
-        GROUP BY s.id
-        ORDER BY s.created_at ASC
-        """)
+        if max_dur and max_dur > 0:
+            c.execute("""
+            SELECT s.*, 
+                   COUNT(CASE WHEN snd.duration <= ? THEN sc.id END) as candidate_count,
+                   SUM(CASE WHEN sc.status = 'liked' AND snd.duration <= ? THEN 1 ELSE 0 END) as liked_count,
+                   SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count
+            FROM slots s
+            LEFT JOIN slot_candidates sc ON s.id = sc.slot_id
+            LEFT JOIN sounds snd ON sc.sound_id = snd.id
+            GROUP BY s.id
+            ORDER BY s.created_at ASC
+            """, (max_dur, max_dur))
+        else:
+            c.execute("""
+            SELECT s.*, 
+                   COUNT(sc.id) as candidate_count,
+                   SUM(CASE WHEN sc.status = 'liked' THEN 1 ELSE 0 END) as liked_count,
+                   SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count
+            FROM slots s
+            LEFT JOIN slot_candidates sc ON s.id = sc.slot_id
+            GROUP BY s.id
+            ORDER BY s.created_at ASC
+            """)
         slots = [_enrich_slot_dict(dict(r)) for r in c.fetchall()]
     return {"slots": slots}
 
@@ -211,19 +237,32 @@ def get_slot(slot_id: str):
     return d
 
 @app.get("/api/slots/{slot_id}/candidates")
-def get_slot_candidates(slot_id: str):
+def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=None, ge=0.0)):
     validate_id(slot_id, "slot_id")
     with get_db_context() as conn:
         c = conn.cursor()
-        c.execute("""
-        SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
-               COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
-               snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source_url, snd.source_id, snd.tags, snd.sha256
-        FROM slot_candidates sc
-        JOIN sounds snd ON sc.sound_id = snd.id
-        WHERE sc.slot_id = ?
-        ORDER BY sc.rank ASC
-        """, (slot_id,))
+        if max_dur and max_dur > 0:
+            c.execute("""
+            SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
+                   COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+                   snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source_url, snd.source_id, snd.tags, snd.sha256,
+                   COALESCE(snd.norm_gain, 1.0) as norm_gain
+            FROM slot_candidates sc
+            JOIN sounds snd ON sc.sound_id = snd.id
+            WHERE sc.slot_id = ? AND snd.duration <= ?
+            ORDER BY sc.rank ASC
+            """, (slot_id, max_dur))
+        else:
+            c.execute("""
+            SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
+                   COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+                   snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source_url, snd.source_id, snd.tags, snd.sha256,
+                   COALESCE(snd.norm_gain, 1.0) as norm_gain
+            FROM slot_candidates sc
+            JOIN sounds snd ON sc.sound_id = snd.id
+            WHERE sc.slot_id = ?
+            ORDER BY sc.rank ASC
+            """, (slot_id,))
         candidates = []
         for r in c.fetchall():
             item = dict(r)
@@ -234,6 +273,18 @@ def get_slot_candidates(slot_id: str):
             item["catalog_url"] = urls["catalog_url"]
             candidates.append(item)
     return {"slot_id": slot_id, "candidates": candidates}
+
+class RescoutRequest(BaseModel):
+    max_dur: Optional[float] = Field(default=None, ge=0.0)
+
+@app.post("/api/slots/{slot_id}/rescout")
+def rescout_slot_with_duration(slot_id: str, req: RescoutRequest):
+    """Re-searches LotsOfSounds and scores with CLAP under the user's max duration constraint."""
+    validate_id(slot_id, "slot_id")
+    scout = get_scout()
+    max_d = req.max_dur if (req.max_dur and req.max_dur > 0) else None
+    found_count = scout.scout_slot(slot_id, max_candidates_per_query=12, max_duration=max_d, allow_on_hold=True)
+    return {"status": "ok", "slot_id": slot_id, "found_count": found_count}
 
 @app.get("/api/sounds/{sound_id}/audio")
 def get_sound_audio(sound_id: str):
@@ -376,7 +427,7 @@ def trim_candidate_audio(req: AudioTrimRequest):
         conn.commit()
     return {"status": "ok", "audio_in": req.audio_in, "audio_out": req.audio_out}
 
-ALLOWED_SETTING_KEYS = {"master_volume", "left_width", "right_width", "footer_height", "unity_path"}
+ALLOWED_SETTING_KEYS = {"master_volume", "left_width", "right_width", "footer_height", "unity_path", "norm_enabled", "max_search_dur"}
 
 class SettingsUpdateRequest(BaseModel):
     settings: Dict[str, Any]
@@ -627,6 +678,7 @@ def mutate_sound(req: MutateRequest):
         mutated_id = f"{req.sound_id}_mutated"
         dest_file = AUDIO_CACHE_DIR / f"{mutated_id}.mp3"
         sf.write(str(dest_file), mutated, sr)
+        mutated_norm_gain = compute_norm_gain(dest_file)
 
         with get_db_context() as conn:
             c = conn.cursor()
@@ -637,9 +689,9 @@ def mutate_sound(req: MutateRequest):
             orig = dict(orig_row)
 
             c.execute("""
-            INSERT INTO sounds (id, source, source_id, name, file_path, duration, license_type, author, source_url, tags, sha256)
-            VALUES (?, 'procedural', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET file_path=excluded.file_path;
+            INSERT INTO sounds (id, source, source_id, name, file_path, duration, license_type, author, source_url, tags, sha256, norm_gain)
+            VALUES (?, 'procedural', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET file_path=excluded.file_path, norm_gain=excluded.norm_gain;
             """, (
                 mutated_id,
                 orig["source_id"],
@@ -650,7 +702,8 @@ def mutate_sound(req: MutateRequest):
                 orig["author"],
                 orig["source_url"],
                 orig["tags"],
-                "mutated_hash"
+                "mutated_hash",
+                mutated_norm_gain
             ))
 
             c.execute("""

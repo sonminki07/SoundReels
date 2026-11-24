@@ -12,11 +12,18 @@ let compareDock = [null, null, null, null, null];
 // Loop Modes: 'sync' (Scene+Audio Sync Loop) | 'audio' (Audio-Only Loop) | 'once' (1x then Next)
 let loopMode = "sync";
 
-// Web Audio API (Spectrum Ambient Glow + Waveform Decoding)
+// Web Audio API (Loudness Normalization + Soft Limiter + Master Gain + Ambient Glow + Waveform Decoding)
 let audioCtx = null;
 let analyser = null;
 let audioSource = null;
+let perSoundGainNode = null;
+let compressorNode = null;
+let masterGainNode = null;
 let isAudioCtxSetup = false;
+
+let isNormEnabled = localStorage.getItem("soundreels_norm_enabled") !== "false";
+let currentNormGain = 1.0;
+let maxSearchDuration = parseFloat(localStorage.getItem("soundreels_max_search_dur")) || 0;
 
 // Bottom Waveform Trimmer State
 let waveformPeaks = [];
@@ -116,9 +123,39 @@ if (Number.isNaN(masterVolume)) masterVolume = 0.4;
 masterVolume = Math.max(0, Math.min(1, masterVolume));
 let preMuteVolume = masterVolume > 0 ? masterVolume : 0.4;
 
+const btnToggleNorm = document.getElementById("btnToggleNorm");
+const maxDurationInput = document.getElementById("maxDurationInput");
+const btnRescoutSlot = document.getElementById("btnRescoutSlot");
+
+if (maxSearchDuration > 0) {
+  maxDurationInput.value = maxSearchDuration;
+}
+
+function updateNormToggleUI() {
+  if (isNormEnabled) {
+    btnToggleNorm.textContent = "🎚️ 음량통일";
+    btnToggleNorm.className = "px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[11px] font-bold hover:bg-emerald-900 transition";
+  } else {
+    btnToggleNorm.textContent = "🎚️ 원본음량";
+    btnToggleNorm.className = "px-2 py-0.5 rounded bg-[#242424] text-gray-400 border border-[#383838] text-[11px] font-bold hover:text-white transition";
+  }
+}
+updateNormToggleUI();
+
+function applyAudioGainNodes() {
+  const effectiveNorm = isNormEnabled ? currentNormGain : 1.0;
+  if (isAudioCtxSetup && perSoundGainNode && masterGainNode) {
+    audioPlayer.volume = 1.0;
+    perSoundGainNode.gain.setValueAtTime(effectiveNorm, audioCtx.currentTime);
+    masterGainNode.gain.setValueAtTime(masterVolume, audioCtx.currentTime);
+  } else {
+    audioPlayer.volume = Math.max(0, Math.min(1, masterVolume * effectiveNorm));
+  }
+}
+
 function applyMasterVolume(vol, persist = true) {
   masterVolume = Math.max(0, Math.min(1, vol));
-  audioPlayer.volume = masterVolume;
+  applyAudioGainNodes();
   const pct = Math.round(masterVolume * 100);
   volumeSlider.value = pct;
   volumeLabel.textContent = `${pct}%`;
@@ -132,6 +169,13 @@ function applyMasterVolume(vol, persist = true) {
     saveSetting("master_volume", masterVolume.toFixed(2));
   }
 }
+
+btnToggleNorm.addEventListener("click", () => {
+  isNormEnabled = !isNormEnabled;
+  updateNormToggleUI();
+  applyAudioGainNodes();
+  saveSetting("norm_enabled", String(isNormEnabled));
+});
 
 applyMasterVolume(masterVolume, false);
 
@@ -177,12 +221,25 @@ function initAudioContext() {
   }
   if (!isAudioCtxSetup) {
     try {
+      perSoundGainNode = audioCtx.createGain();
+      compressorNode = audioCtx.createDynamicsCompressor();
+      compressorNode.threshold.value = -3;
+      compressorNode.knee.value = 6;
+      compressorNode.ratio.value = 12;
+      compressorNode.attack.value = 0.002;
+      compressorNode.release.value = 0.08;
+      masterGainNode = audioCtx.createGain();
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 128;
+
       audioSource = audioCtx.createMediaElementSource(audioPlayer);
-      audioSource.connect(analyser);
+      audioSource.connect(perSoundGainNode);
+      perSoundGainNode.connect(compressorNode);
+      compressorNode.connect(masterGainNode);
+      masterGainNode.connect(analyser);
       analyser.connect(audioCtx.destination);
       isAudioCtxSetup = true;
+      applyAudioGainNodes();
     } catch (e) {
       console.warn("Web Audio MediaElementSource setup skipped:", e);
     }
@@ -294,7 +351,7 @@ requestAnimationFrame(mainLoop);
 function triggerAudioFromIn() {
   if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
   initAudioContext();
-  audioPlayer.volume = masterVolume;
+  applyAudioGainNodes();
   audioPlayer.currentTime = audioIn;
   audioPlayer.play().catch(() => {});
 }
@@ -1054,7 +1111,8 @@ btnOpenSourceUrl.addEventListener("click", () => {
 
 async function loadSlots() {
   try {
-    const res = await fetch("/api/slots");
+    const qParam = maxSearchDuration > 0 ? `?max_dur=${encodeURIComponent(maxSearchDuration)}` : "";
+    const res = await fetch(`/api/slots${qParam}`);
     const data = await res.json();
     allSlots = data.slots || [];
     renderSlotsList();
@@ -1085,7 +1143,8 @@ async function selectSlot(slotId, autoPlay = true) {
 
   try {
     loadingSpinner.classList.remove("hidden");
-    const res = await fetch(`/api/slots/${slotId}/candidates`);
+    const qParam = maxSearchDuration > 0 ? `?max_dur=${encodeURIComponent(maxSearchDuration)}` : "";
+    const res = await fetch(`/api/slots/${slotId}/candidates${qParam}`);
     const data = await res.json();
     currentCandidates = data.candidates || [];
     loadingSpinner.classList.add("hidden");
@@ -1101,9 +1160,9 @@ async function selectSlot(slotId, autoPlay = true) {
       waveformPeaks = [];
       audioDuration = 0;
       btnOpenSourceUrl.classList.add("hidden");
-      currentSoundName.textContent = "후보 사운드 없음";
-      currentSoundMeta.textContent = "LotsOfSounds 검색 중이거나 대기 상태";
-      queuePosition.textContent = "0 / 0";
+      currentSoundName.textContent = maxSearchDuration > 0 ? `${maxSearchDuration}초 이하 후보 없음` : "후보 사운드 없음";
+      currentSoundMeta.textContent = maxSearchDuration > 0 ? "'🔍 새로 찾기'를 누르면 해당 길이로 다시 검색합니다" : "LotsOfSounds 검색 중이거나 대기 상태";
+      queuePosition.textContent = "후보 0 / 0";
       updateAudioTrimUI();
     }
   } catch (e) {
@@ -1118,12 +1177,14 @@ function playCandidate(index, autoPlay = true) {
 
   currentIndex = index;
   const cand = currentCandidates[index];
+  currentNormGain = cand.norm_gain || 1.0;
+  applyAudioGainNodes();
 
   currentSoundName.textContent = cand.name;
   currentSoundMeta.textContent = `${cand.duration.toFixed(1)}s · ${cand.license_type} · ${cand.author || "LotsOfSounds"}`;
   soundBadgeSource.textContent = `LotsOfSounds · ${cand.license_type}`;
   soundMatchScore.textContent = `${Math.round(cand.score * 100)}% Match`;
-  queuePosition.textContent = `${index + 1} / ${currentCandidates.length}`;
+  queuePosition.textContent = `후보 ${index + 1} / ${currentCandidates.length}`;
 
   // Show/hide Original Source Link button
   const srcUrl = cand.original_source_url || cand.catalog_url;
@@ -1151,12 +1212,12 @@ function playCandidate(index, autoPlay = true) {
   // Decode bottom waveform & load trim boundaries
   decodeWaveformForCandidate(cand);
 
-  // Enforce persistent master volume before and after loading audio
+  // Enforce normalized gain & master volume before and after loading audio
   audioPlayer.pause();
-  audioPlayer.volume = masterVolume;
+  applyAudioGainNodes();
   audioPlayer.src = cand.audio_url;
   audioPlayer.onloadedmetadata = () => {
-    audioPlayer.volume = masterVolume;
+    applyAudioGainNodes();
     const startAt = cand.audio_in || 0.0;
     audioPlayer.currentTime = startAt;
     if (!autoPlay) {
@@ -1232,17 +1293,20 @@ function renderCandidatesQueue() {
 
   currentCandidates.forEach((c, idx) => {
     const item = document.createElement("div");
-    item.className = `candidate-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-[13px] ${idx === currentIndex ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#222]"}`;
+    item.className = `candidate-item p-3 rounded-lg flex items-center justify-between cursor-pointer text-[14px] ${idx === currentIndex ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#222]"}`;
 
     const likeIcon = c.candidate_status === "liked" ? "⭐ " : "";
     const confirmedTag = c.candidate_status === "confirmed" ? " [확정]" : "";
     const srcUrl = c.original_source_url || c.catalog_url;
 
     const infoDiv = document.createElement("div");
-    infoDiv.className = "truncate flex-1 pr-2 min-w-0";
+    infoDiv.className = "truncate flex-1 pr-2 min-w-0 flex items-center gap-2.5";
     infoDiv.innerHTML = `
-      <div class="font-semibold text-gray-200 truncate">${likeIcon}${c.name}${confirmedTag}</div>
-      <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}%</div>
+      <span class="shrink-0 bg-[#242424] text-[#1DB954] font-mono font-bold text-xs px-2 py-1 rounded border border-[#333]">#${idx + 1}</span>
+      <div class="truncate min-w-0">
+        <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}</div>
+        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match</div>
+      </div>
     `;
 
     const btnsDiv = document.createElement("div");
@@ -1470,7 +1534,7 @@ audioPlayer.addEventListener("timeupdate", () => {
 });
 
 audioPlayer.addEventListener("play", () => {
-  audioPlayer.volume = masterVolume;
+  applyAudioGainNodes();
   playIcon.classList.add("hidden");
   pauseIcon.classList.remove("hidden");
 });
@@ -1669,6 +1733,16 @@ async function loadSettingsFromServer() {
         applyMasterVolume(v, false);
       }
     }
+    if (s.norm_enabled !== undefined) {
+      isNormEnabled = s.norm_enabled !== "false";
+      updateNormToggleUI();
+      applyAudioGainNodes();
+    }
+    if (s.max_search_dur !== undefined) {
+      const d = parseFloat(s.max_search_dur);
+      maxSearchDuration = !Number.isNaN(d) && d > 0 ? d : 0;
+      maxDurationInput.value = maxSearchDuration > 0 ? maxSearchDuration : "";
+    }
     if (s.left_width) document.getElementById("leftPanel").style.width = `${s.left_width}px`;
     if (s.right_width) document.getElementById("rightPanel").style.width = `${s.right_width}px`;
     if (s.footer_height) document.getElementById("bottomFooter").style.height = `${s.footer_height}px`;
@@ -1679,19 +1753,62 @@ async function loadSettingsFromServer() {
   }
 }
 
+// Max Duration Filter & Live Re-Scout Handlers
+maxDurationInput.addEventListener("change", async () => {
+  const val = parseFloat(maxDurationInput.value);
+  maxSearchDuration = !Number.isNaN(val) && val > 0 ? val : 0;
+  saveSetting("max_search_dur", maxSearchDuration > 0 ? String(maxSearchDuration) : "");
+  await loadSlots();
+  if (currentSlot) {
+    await selectSlot(currentSlot.id, false);
+  }
+});
+
+btnRescoutSlot.addEventListener("click", async () => {
+  if (!currentSlot) return;
+  const val = parseFloat(maxDurationInput.value);
+  maxSearchDuration = !Number.isNaN(val) && val > 0 ? val : 0;
+  saveSetting("max_search_dur", maxSearchDuration > 0 ? String(maxSearchDuration) : "");
+
+  btnRescoutSlot.disabled = true;
+  btnRescoutSlot.textContent = "⏳ 검색 중...";
+  loadingSpinner.classList.remove("hidden");
+
+  try {
+    const res = await fetch(`/api/slots/${currentSlot.id}/rescout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ max_dur: maxSearchDuration > 0 ? maxSearchDuration : null }),
+    });
+    const data = await res.json();
+    await loadSlots();
+    await selectSlot(currentSlot.id, false);
+    if (res.ok && data.found_count === 0) {
+      alert(`${maxSearchDuration > 0 ? maxSearchDuration + "초 이하의 " : ""}새 후보를 찾지 못했습니다. 최대 길이를 조금 늘려서 다시 찾아보세요.`);
+    }
+  } catch (e) {
+    alert(`재탐색 오류: ${e}`);
+  } finally {
+    loadingSpinner.classList.add("hidden");
+    btnRescoutSlot.disabled = false;
+    btnRescoutSlot.textContent = "🔍 새로 찾기";
+  }
+});
+
 const btnCheckUpdate = document.getElementById("btnCheckUpdate");
 const updateDot = document.getElementById("updateDot");
 
 async function checkForUpdate(silent = true) {
   try {
-    if (!silent) btnCheckUpdate.querySelector("span:first-child").textContent = "🔄 확인 중...";
     const res = await fetch("/api/system/check_update");
     const data = await res.json();
 
     if (data.has_update) {
+      // Only show the update button when a newer version exists!
+      btnCheckUpdate.classList.remove("hidden");
+      btnCheckUpdate.classList.add("inline-flex");
       updateDot.classList.remove("hidden");
       btnCheckUpdate.querySelector("span:first-child").textContent = `🔄 업데이트 (${data.behind_count})`;
-      btnCheckUpdate.classList.add("border-[#1DB954]", "text-emerald-300");
 
       if (!silent) {
         const msg = `최신 버전이 있습니다! (${data.local_rev} → ${data.remote_rev}, ${data.behind_count}개 커밋)\n\n${(data.changes || []).join("\n")}\n\n지금 최신 판으로 업데이트할까요?`;
@@ -1700,7 +1817,7 @@ async function checkForUpdate(silent = true) {
           const applyRes = await fetch("/api/system/apply_update", { method: "POST" });
           const applyData = await applyRes.json();
           if (applyRes.ok) {
-            alert(`업데이트 완료! (${applyData.local_rev})\n${applyData.needs_restart ? "백엔드 파일도 업데이트되었습니다. 페이지를 새로고침합니다 (앱의 경우 껐다 켜면 백엔드까지 100% 반영됩니다)." : "최신 UI로 새로고침합니다."}`);
+            alert(`업데이트 완료! (${applyData.local_rev})\n${applyData.needs_restart ? "백엔드 파일도 업데이트되었습니다. 프로그램을 껐다 켜면 백엔드까지 100% 반영됩니다." : "최신 UI로 새로고침합니다."}`);
             window.location.reload();
           } else {
             alert(`업데이트 실패: ${applyData.detail || "오류 발생"}`);
@@ -1709,16 +1826,10 @@ async function checkForUpdate(silent = true) {
         }
       }
     } else {
+      // Hide update button completely when up-to-date
+      btnCheckUpdate.classList.add("hidden");
+      btnCheckUpdate.classList.remove("inline-flex");
       updateDot.classList.add("hidden");
-      btnCheckUpdate.querySelector("span:first-child").textContent = "🔄 업데이트";
-      btnCheckUpdate.classList.remove("border-[#1DB954]", "text-emerald-300");
-      if (!silent) {
-        if (data.status === "error") {
-          alert(`업데이트 확인 실패: ${data.message}`);
-        } else {
-          alert(`현재 최신 버전입니다! (${data.local_rev})`);
-        }
-      }
     }
   } catch (e) {
     if (!silent) alert(`업데이트 확인 중 오류: ${e}`);
@@ -1742,7 +1853,8 @@ document.querySelectorAll(".dock-btn").forEach(btn => {
         playCandidate(cIdx);
       } else {
         initAudioContext();
-        audioPlayer.volume = masterVolume;
+        currentNormGain = sound.norm_gain || 1.0;
+        applyAudioGainNodes();
         audioPlayer.src = sound.audio_url || `/api/sounds/${sound.sound_id}/audio`;
         audioPlayer.play().catch(() => {});
         currentSoundName.textContent = sound.name;

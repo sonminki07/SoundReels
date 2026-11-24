@@ -120,3 +120,27 @@
 4) 자가 업데이트 기능: 헤더 [🔄 업데이트] 버튼 및 /api/system/check_update, /api/system/apply_update 추가 (GitHub origin/main 최신 커밋 확인 및 원클릭 반영)
 5) 하단 비교 독 자동 확장 & 가독성 개선: bottomFooter 내 5개 비교 독 버튼 및 Unity 입력창을 flex-1 h-full 반응형으로 개편하고 전체 UI 폰트 크기를 상향 조정
 ================================================================================
+
+7. v1.4 업데이트 조건부 노출, 후보 순번 가시성 강화, 인지 음량 평준화(-18 LUFS), 최대 길이 필터/재탐색
+--------------------------------------------------------------------------------
+- 요청 배경:
+  1) 최신 업데이트가 실제로 존재할 때만 헤더 업데이트 버튼 노출
+  2) 현재 재생 중인 후보가 몇 번째 후보인지(순번/전체) 한눈에 보이도록 확대
+  3) 사운드별 체감 음량 편차 해소(-18 LUFS 기준 평준화) 및 마스터 볼륨 연동
+  4) 사용자가 원하는 최대 길이(초) 이내로 후보 필터링 및 온라인 재탐색 지원
+- 구현 내역:
+  1) 업데이트 버튼 조건부 노출 (index.html, app.js):
+     - #btnCheckUpdate 기본 hidden 처리, checkForUpdate()에서 has_update === true일 때만 노출
+  2) 후보 순번 및 대기열 가시성 개선 (index.html, app.js):
+     - #queuePosition 배지를 `후보 N / M` 형식으로 확대 강조
+     - 우측 후보 큐 항목에 `#1`, `#2` 등 굵은 순번 배지 및 14px 폰트 적용
+  3) 인지 음량 평준화 파이프라인 (loudness.py, db.py, main.py, app.js):
+     - pyloudnorm 기반 ITU-R BS.1770(-18 LUFS, 0.45s 미만은 활성 RMS fallback, [0.15x~8.0x] 클램프) 계산 모듈 추가 및 기존 249개 캐시 음원 norm_gain 백필(min=0.28x, max=8.00x, avg=2.65x)
+     - Web Audio API 체인(`perSoundGainNode -> DynamicsCompressorNode -> masterGainNode -> analyser`) 구성 및 `#btnToggleNorm`(🎚️ 음량통일) 토글/설정 영구 저장(`norm_enabled`)
+  4) 최대 길이(초) 필터 및 재탐색 (main.py, sound_scout.py, index.html, app.js):
+     - `/api/slots?max_dur=`, `/api/slots/{slot_id}/candidates?max_dur=` 필터 및 `POST /api/slots/{slot_id}/rescout` 엔드포인트 추가
+     - 우측 패널 `#maxDurationInput` + `#btnRescoutSlot`(🔍 새로 찾기) 추가 및 `max_search_dur` 설정 저장
+- 검증 결과 (QA 통과):
+  - `verify_v14.py` 통과: index.html/app.js v1.4 토큰, `max_dur=2.0` 필터(30개 슬롯 / `sfx_dash_wind` 6개 후보 & `norm_gain`), `POST /api/slots/sfx_ui_tab_open/rescout` (`found_count=4`) 확인
+  - `test_v12.py` 회귀 테스트 전체 통과 (`ALL BACKEND TESTS PASSED!`)
+================================================================================

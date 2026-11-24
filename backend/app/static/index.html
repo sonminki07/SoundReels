@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SoundReels — Game SFX Explorer</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="style.css?v=1.3">
+  <link rel="stylesheet" href="style.css?v=1.4">
 </head>
 <body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans text-[14px]">
 
@@ -13,7 +13,7 @@
   <header class="h-14 border-b border-[#282828] bg-[#000000] px-6 flex items-center justify-between shrink-0 z-20">
     <div class="flex items-center space-x-3">
       <span class="text-2xl font-black tracking-tight text-[#1DB954]">🎧 SoundReels</span>
-      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v1.3</span>
+      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v1.4</span>
     </div>
     
     <!-- Search / Filter -->
@@ -32,10 +32,11 @@
         <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
         <span id="activeSlotBadge">프로젝트 로딩 중...</span>
       </span>
-      <button id="btnCheckUpdate" title="최신 버전 확인 및 업데이트"
-        class="inline-flex items-center gap-1.5 hover:text-white px-3 py-1.5 rounded-full bg-[#1e1e1e] hover:bg-[#2c2c2c] border border-[#383838] transition text-xs font-semibold">
-        <span>🔄 업데이트</span>
-        <span id="updateDot" class="hidden w-2 h-2 rounded-full bg-[#1DB954] animate-ping"></span>
+      <!-- Update button: hidden unless a newer version actually exists on GitHub -->
+      <button id="btnCheckUpdate" title="최신 버전이 있습니다! 클릭하여 업데이트"
+        class="hidden items-center gap-1.5 hover:text-white px-3 py-1.5 rounded-full bg-emerald-950 hover:bg-emerald-900 border border-[#1DB954] text-emerald-300 transition text-xs font-bold">
+        <span>🔄 업데이트 가능</span>
+        <span id="updateDot" class="w-2 h-2 rounded-full bg-[#1DB954] animate-ping"></span>
       </button>
       <button id="toggleLeftBtn" class="hover:text-white px-3 py-1.5 rounded-full bg-[#222] hover:bg-[#303030] border border-[#333] text-xs font-semibold">좌측 패널</button>
     </div>
@@ -175,13 +176,13 @@
           </div>
         </div>
 
-        <!-- Bottom Sound Title -->
-        <div class="flex items-end justify-between shrink-0">
-          <div class="min-w-0 flex-1 pr-3">
+        <!-- Bottom Sound Title & Prominent Candidate Position -->
+        <div class="flex items-center justify-between gap-3 shrink-0">
+          <div class="min-w-0 flex-1">
             <h1 id="currentSoundName" class="text-lg font-bold text-white tracking-wide truncate">사운드를 선택하세요</h1>
             <p id="currentSoundMeta" class="text-[13px] text-gray-400 truncate">0.0s · CC0 Universal</p>
           </div>
-          <span id="queuePosition" class="text-[13px] font-mono text-gray-400 shrink-0">1 / 8</span>
+          <span id="queuePosition" class="text-sm font-mono font-black text-white bg-[#262626] px-3.5 py-1.5 rounded-full border border-[#444] shadow shrink-0">후보 1 / 8</span>
         </div>
       </div>
 
@@ -234,8 +235,12 @@
             </button>
           </div>
 
-          <!-- Master Volume Slider -->
-          <div class="flex items-center gap-1.5 shrink-0" title="전체 사운드 마스터 볼륨 조절">
+          <!-- Master Volume & Loudness Normalization -->
+          <div class="flex items-center gap-2 shrink-0" title="전체 사운드 마스터 볼륨 조절">
+            <button id="btnToggleNorm" title="모든 사운드 음량 자동 평준화 (-18 LUFS)"
+              class="px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[11px] font-bold hover:bg-emerald-900 transition">
+              🎚️ 음량통일
+            </button>
             <button id="btnMute" class="text-gray-200 hover:text-white text-base w-6 text-center leading-none">🔉</button>
             <input id="volumeSlider" type="range" min="0" max="100" value="40" class="w-24 accent-[#1DB954] cursor-pointer h-1.5 bg-[#333] rounded-lg">
             <span id="volumeLabel" class="text-xs font-mono text-gray-300 w-9 text-right">40%</span>
@@ -289,6 +294,20 @@
       <div class="flex border-b border-[#282828] text-[13px] font-bold text-center">
         <button id="tabSlotsBtn" class="flex-1 py-3 border-b-2 border-[#1DB954] text-white">사운드 슬롯 (30)</button>
         <button id="tabCandidatesBtn" class="flex-1 py-3 border-b-2 border-transparent text-gray-400 hover:text-white">추천 대기열</button>
+      </div>
+
+      <!-- Max Duration Filter & Re-Scout Bar -->
+      <div class="px-2.5 py-2 border-b border-[#282828] bg-[#141414] flex items-center justify-between gap-1.5 text-xs">
+        <div class="flex items-center gap-1.5">
+          <span class="text-gray-300 font-semibold shrink-0">⏱️ 최대:</span>
+          <input id="maxDurationInput" type="number" step="0.5" min="0" placeholder="전체"
+            class="w-16 bg-[#222] border border-[#383838] rounded px-2 py-1 text-white font-mono text-xs outline-none focus:border-[#1DB954]">
+          <span class="text-gray-400 shrink-0">초</span>
+        </div>
+        <button id="btnRescoutSlot" title="설정한 최대 길이 이하로 온라인에서 후보를 새로 찾습니다"
+          class="px-2.5 py-1 rounded bg-[#242424] hover:bg-[#1DB954] hover:text-black text-emerald-400 border border-[#383838] font-bold transition shrink-0">
+          🔍 새로 찾기
+        </button>
       </div>
 
       <!-- Tab 1: Slots List -->
@@ -359,6 +378,6 @@
   <!-- Hidden Native Audio Element -->
   <audio id="audioPlayer"></audio>
 
-  <script src="app.js?v=1.3"></script>
+  <script src="app.js?v=1.4"></script>
 </body>
 </html>

@@ -138,6 +138,7 @@ def init_db():
         _ensure_column(c, "slots", "sound_offset", "REAL DEFAULT 0.0")
         _ensure_column(c, "slot_candidates", "audio_in", "REAL DEFAULT 0.0")
         _ensure_column(c, "slot_candidates", "audio_out", "REAL DEFAULT 0.0")
+        _ensure_column(c, "sounds", "norm_gain", "REAL DEFAULT 1.0")
         
         # Performance Indices
         c.execute("CREATE INDEX IF NOT EXISTS idx_candidates_slot_rank ON slot_candidates(slot_id, rank);")
