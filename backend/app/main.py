@@ -155,6 +155,8 @@ class AudioTrimRequest(BaseModel):
     sound_id: str
     audio_in: float = Field(ge=0.0)
     audio_out: float = Field(ge=0.0)
+    playback_rate: float = Field(default=1.0, ge=0.25, le=4.0)
+    preserve_pitch: int = Field(default=1, ge=0, le=1)
 
 class OpenExternalRequest(BaseModel):
     url: str
@@ -174,6 +176,8 @@ def export_processed_audio_to_unity(
     dest_wav_path: Path,
     audio_in: float = 0.0,
     audio_out: float = 0.0,
+    playback_rate: float = 1.0,
+    preserve_pitch: bool = True,
 ) -> bool:
     try:
         y, sr = librosa.load(str(src_path), sr=48000, mono=True)
@@ -193,13 +197,23 @@ def export_processed_audio_to_unity(
             if len(processed) == 0:
                 processed = y
 
-        # 2. Peak normalization to -1.0 dBFS (prevent digital clipping)
+        # 2. Apply playback speed modification (pitch-preserving time-stretch OR pitch-linked resample)
+        rate = max(0.25, min(4.0, float(playback_rate or 1.0)))
+        if abs(rate - 1.0) > 1e-3 and len(processed) >= 128:
+            if preserve_pitch:
+                n_fft = min(2048, max(128, 2 ** int(np.floor(np.log2(len(processed))))))
+                processed = librosa.effects.time_stretch(processed, rate=rate, n_fft=n_fft)
+            else:
+                orig_sr = max(8000, int(round(sr * rate)))
+                processed = librosa.resample(processed, orig_sr=orig_sr, target_sr=sr)
+
+        # 3. Peak normalization to -1.0 dBFS (prevent digital clipping)
         peak = np.max(np.abs(processed))
         if peak > 0:
             target_peak = 10.0 ** (-1.0 / 20.0)  # ~0.891
             processed = processed * (target_peak / peak)
 
-        # 3. Write uncompressed 24-bit PCM WAV for Unity
+        # 4. Write uncompressed 24-bit PCM WAV for Unity
         sf.write(str(dest_wav_path), processed, sr, subtype="PCM_24")
         return True
     except Exception as e:
@@ -283,6 +297,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             c.execute("""
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+                   COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
                    snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
@@ -294,6 +309,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             c.execute("""
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+                   COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
                    snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
@@ -539,12 +555,20 @@ def trim_candidate_audio(req: AudioTrimRequest):
     with get_db_context() as conn:
         c = conn.cursor()
         c.execute("""
-        UPDATE slot_candidates SET audio_in = ?, audio_out = ? WHERE slot_id = ? AND sound_id = ?
-        """, (req.audio_in, req.audio_out, req.slot_id, req.sound_id))
+        UPDATE slot_candidates
+        SET audio_in = ?, audio_out = ?, playback_rate = ?, preserve_pitch = ?
+        WHERE slot_id = ? AND sound_id = ?
+        """, (req.audio_in, req.audio_out, req.playback_rate, req.preserve_pitch, req.slot_id, req.sound_id))
         if c.rowcount == 0:
             raise HTTPException(status_code=404, detail="Candidate not found")
         conn.commit()
-    return {"status": "ok", "audio_in": req.audio_in, "audio_out": req.audio_out}
+    return {
+        "status": "ok",
+        "audio_in": req.audio_in,
+        "audio_out": req.audio_out,
+        "playback_rate": req.playback_rate,
+        "preserve_pitch": req.preserve_pitch,
+    }
 
 ALLOWED_SETTING_KEYS = {
     "master_volume",
@@ -555,6 +579,7 @@ ALLOWED_SETTING_KEYS = {
     "norm_enabled",
     "max_search_dur",
     "gemini_api_key",
+    "keymap_settings",
 }
 
 class SettingsUpdateRequest(BaseModel):
@@ -726,7 +751,8 @@ def confirm_candidate(req: ConfirmRequest):
         c = conn.cursor()
 
         c.execute("""
-        SELECT COALESCE(audio_in, 0.0) as audio_in, COALESCE(audio_out, 0.0) as audio_out
+        SELECT COALESCE(audio_in, 0.0) as audio_in, COALESCE(audio_out, 0.0) as audio_out,
+               COALESCE(playback_rate, 1.0) as playback_rate, COALESCE(preserve_pitch, 1) as preserve_pitch
         FROM slot_candidates WHERE slot_id = ? AND sound_id = ?
         """, (req.slot_id, req.sound_id))
         cand_row = c.fetchone()
@@ -769,6 +795,8 @@ def confirm_candidate(req: ConfirmRequest):
                     dest_file,
                     audio_in=float(cand_row["audio_in"]),
                     audio_out=float(cand_row["audio_out"]),
+                    playback_rate=float(cand_row["playback_rate"]),
+                    preserve_pitch=bool(cand_row["preserve_pitch"]),
                 )
                 exported_path = str(dest_file)
 
@@ -924,6 +952,7 @@ def batch_export_to_unity(req: BatchExportRequest):
         c.execute("""
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+               COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
                snd.name, snd.author, snd.source_url, snd.source_id, snd.license_type
         FROM slot_candidates sc
         JOIN sounds snd ON sc.sound_id = snd.id
@@ -944,6 +973,8 @@ def batch_export_to_unity(req: BatchExportRequest):
                         dest_file,
                         audio_in=float(item["audio_in"]),
                         audio_out=float(item["audio_out"]),
+                        playback_rate=float(item["playback_rate"]),
+                        preserve_pitch=bool(item["preserve_pitch"]),
                     )
                     urls = resolve_source_urls(item)
                     credit_url = urls["original_source_url"] or item["source_url"]

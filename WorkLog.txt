@@ -207,3 +207,24 @@
   - `verify_v17.py` 통과 (`source_kind` 3종 API 검증, `/api/open_external_url` 200 OK, `index.html`/`app.js?v=1.7` 토큰, `check_update` `has_update=False`)
   - `test_v12.py` 회귀 테스트 통과 및 `SoundReels.lnk` 재기동 확인
 ================================================================================
+
+11. v1.8 오디오 파형 배속 조절 및 파일 수정, 출처 클릭 시 자동 복사+창 열기, 단축키/연타 설정 창
+--------------------------------------------------------------------------------
+- 요청 배경:
+  1) 파형 사운드의 배속 재생 및 수정(Unity 내보내기 포함) 지원
+  2) 원본 출처 클릭 시 창이 열림과 동시에 주소도 자동 복사되도록 개선
+  3) 스페이스바 2연타(다시 재생) 및 앞/뒤 화살표 등 단축키를 설정할 수 있는 전용 설정 창 구현
+- 구현 내역:
+  1) 배속 조절 및 비파괴 수정 (`db.py`, `main.py`, `index.html`, `app.js`):
+     - `slot_candidates`에 `playback_rate REAL DEFAULT 1.0`, `preserve_pitch INTEGER DEFAULT 1` 마이그레이션 추가
+     - 파형 패널에 배속 프리셋(`0.75x~2.0x`), 슬라이더(`0.50~2.50x`), `🎵 피치유지` / `🎚️ 피치연동` 토글 및 실효 길이 표시 추가
+     - `export_processed_audio_to_unity()`에서 `librosa.effects.time_stretch`(피치유지) 및 `librosa.resample`(피치연동)으로 Unity WAV 내보내기에 배속 적용
+  2) 원본 출처 클릭 시 창 열기 + 자동 복사 (`app.js`):
+     - `openOriginalSource()`가 유효 외부 URL일 때 즉시 `copyTextToClipboard()`로 주소를 복사함과 동시에 PyWebView 전용 출처 창을 띄우도록 개선
+  3) 조작/단축키 설정 창 및 스페이스 연타 다시 재생 (`main.py`, `index.html`, `app.js`):
+     - 상단 `⚙️ 설정` 버튼 및 `#settingsModal` 추가: 스페이스바 2연타(기본 320ms) 처음부터 다시 재생(`replayFromStart()`), 좌/우 화살표(`←`/`→`) 및 보조 위/아래 화살표 넘기기, 각 단축키 실시간 키 캡처 변경, `keymap_settings` DB 저장/기본값 복원 지원
+- 검증 결과 (QA 통과):
+  - `node --check app.js` 구문 오류 0건
+  - `verify_v18.py` 통과: 1.50s@1.50x 내보내기 실효 길이 `time_stretch`/`resample` 각 ~1.000s 검증, `keymap_settings` 저장, `check_update` `has_update=False` 확인
+  - `test_v12.py` 회귀 테스트 통과 및 `SoundReels.lnk` 재기동 확인
+================================================================================

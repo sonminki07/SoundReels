@@ -138,6 +138,8 @@ def init_db():
         _ensure_column(c, "slots", "sound_offset", "REAL DEFAULT 0.0")
         _ensure_column(c, "slot_candidates", "audio_in", "REAL DEFAULT 0.0")
         _ensure_column(c, "slot_candidates", "audio_out", "REAL DEFAULT 0.0")
+        _ensure_column(c, "slot_candidates", "playback_rate", "REAL DEFAULT 1.0")
+        _ensure_column(c, "slot_candidates", "preserve_pitch", "INTEGER DEFAULT 1")
         _ensure_column(c, "sounds", "norm_gain", "REAL DEFAULT 1.0")
         
         # Performance Indices

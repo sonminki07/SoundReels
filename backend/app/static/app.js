@@ -26,14 +26,38 @@ let isNormEnabled = localStorage.getItem("soundreels_norm_enabled") !== "false";
 let currentNormGain = 1.0;
 let maxSearchDuration = parseFloat(localStorage.getItem("soundreels_max_search_dur")) || 0;
 
-// Bottom Waveform Trimmer State
+// Bottom Waveform Trimmer & Speed State
 let waveformPeaks = [];
 let audioDuration = 0.0;
 let audioIn = 0.0;
 let audioOut = 0.0;
+let currentPlaybackRate = 1.0;
+let currentPreservePitch = true;
 let audioUndoStack = [];
 let audioDecodeAbort = null;
 let isDraggingAudioHandle = null; // 'in' | 'out' | 'scrub' | null
+
+// Shortcut & Playback Settings State
+const DEFAULT_KEYMAP_SETTINGS = {
+  doubleSpaceReplay: true,
+  doubleSpaceWindowMs: 320,
+  arrowUpDownAlso: true,
+  keys: {
+    playPause: "Space",
+    replay: "KeyR",
+    prevCandidate: "ArrowLeft",
+    nextCandidate: "ArrowRight",
+    like: "KeyS",
+    similar: "KeyF",
+    mutate: "KeyM",
+    confirm: "Enter",
+    loopMode: "KeyL",
+    sourceLink: "KeyO",
+  },
+};
+let keymapSettings = JSON.parse(JSON.stringify(DEFAULT_KEYMAP_SETTINGS));
+let lastSpacePressAt = 0;
+let capturingKeyAction = null;
 
 // Scene Preview & Trimmer State
 let sceneMediaType = null; // 'video' | 'gif' | null
@@ -385,7 +409,10 @@ async function decodeWaveformForCandidate(cand) {
   audioDuration = cand.duration || 0;
   audioIn = cand.audio_in || 0.0;
   audioOut = cand.audio_out > 0 ? cand.audio_out : audioDuration;
+  currentPlaybackRate = Number(cand.playback_rate) || 1.0;
+  currentPreservePitch = cand.preserve_pitch !== 0;
   audioUndoStack = [];
+  applyAudioPlaybackSpeed();
   updateAudioTrimUI();
 
   try {
@@ -475,6 +502,35 @@ function drawAudioWaveform() {
   audioWaveformCtx.fillRect(playRatio * w - 1, 0, 2, h);
 }
 
+const audioRateSlider = document.getElementById("audioRateSlider");
+const audioRateLabel = document.getElementById("audioRateLabel");
+const btnPreservePitch = document.getElementById("btnPreservePitch");
+
+function applyAudioPlaybackSpeed() {
+  const r = Math.max(0.5, Math.min(2.5, Number(currentPlaybackRate) || 1.0));
+  currentPlaybackRate = r;
+  audioPlayer.playbackRate = r;
+  audioPlayer.preservesPitch = !!currentPreservePitch;
+  audioPlayer.mozPreservesPitch = !!currentPreservePitch;
+  audioPlayer.webkitPreservesPitch = !!currentPreservePitch;
+
+  if (audioRateSlider) audioRateSlider.value = r;
+  if (audioRateLabel) audioRateLabel.textContent = `${r.toFixed(2)}x`;
+  document.querySelectorAll(".speed-preset-btn").forEach(btn => {
+    const pr = parseFloat(btn.dataset.rate);
+    const active = Math.abs(pr - r) < 0.01;
+    btn.className = active
+      ? "speed-preset-btn px-1.5 py-0.5 rounded text-[11px] bg-[#1DB954] text-black font-bold"
+      : "speed-preset-btn px-1.5 py-0.5 rounded text-[11px] text-gray-300 hover:bg-[#2c2c2c]";
+  });
+  if (btnPreservePitch) {
+    btnPreservePitch.textContent = currentPreservePitch ? "🎵 피치유지" : "🎚️ 피치연동";
+    btnPreservePitch.className = currentPreservePitch
+      ? "px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[11px] font-bold hover:bg-emerald-900"
+      : "px-1.5 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-700 text-[11px] font-bold hover:bg-amber-900";
+  }
+}
+
 function updateAudioTrimUI() {
   const dur = audioDuration || 1;
   const inPct = Math.max(0, Math.min(100, (audioIn / dur) * 100));
@@ -483,14 +539,18 @@ function updateAudioTrimUI() {
   audioOutHandle.style.left = `${outPct}%`;
 
   const selLen = Math.max(0, audioOut - audioIn);
+  const effLen = selLen / Math.max(0.25, currentPlaybackRate || 1.0);
   const isFull = audioIn <= 0.01 && Math.abs(audioOut - audioDuration) <= 0.05;
+  const speedSuffix = Math.abs(currentPlaybackRate - 1.0) >= 0.01
+    ? ` → 실효 ${effLen.toFixed(2)}s (${currentPlaybackRate.toFixed(2)}x)`
+    : "";
   audioTrimRangeLabel.textContent = isFull
-    ? `구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)`
-    : `선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)`;
+    ? `구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)${speedSuffix}`
+    : `선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)${speedSuffix}`;
 }
 
 function pushAudioUndo() {
-  audioUndoStack.push([audioIn, audioOut]);
+  audioUndoStack.push([audioIn, audioOut, currentPlaybackRate, currentPreservePitch]);
   if (audioUndoStack.length > 20) audioUndoStack.shift();
 }
 
@@ -499,6 +559,8 @@ async function saveAudioTrimToBackend() {
   const cand = currentCandidates[currentIndex];
   cand.audio_in = audioIn;
   cand.audio_out = audioOut;
+  cand.playback_rate = Number(currentPlaybackRate.toFixed(2));
+  cand.preserve_pitch = currentPreservePitch ? 1 : 0;
   try {
     await fetch("/api/actions/trim_audio", {
       method: "POST",
@@ -508,6 +570,8 @@ async function saveAudioTrimToBackend() {
         sound_id: cand.sound_id,
         audio_in: Number(audioIn.toFixed(3)),
         audio_out: Number(audioOut.toFixed(3)),
+        playback_rate: cand.playback_rate,
+        preserve_pitch: cand.preserve_pitch,
       }),
     });
   } catch (e) {
@@ -602,9 +666,12 @@ document.getElementById("btnAudioApply").addEventListener("click", async () => {
 
 document.getElementById("btnAudioUndo").addEventListener("click", async () => {
   if (audioUndoStack.length === 0) return;
-  const [prevIn, prevOut] = audioUndoStack.pop();
+  const [prevIn, prevOut, prevRate, prevPitch] = audioUndoStack.pop();
   audioIn = prevIn;
   audioOut = prevOut;
+  if (prevRate !== undefined) currentPlaybackRate = prevRate;
+  if (prevPitch !== undefined) currentPreservePitch = prevPitch;
+  applyAudioPlaybackSpeed();
   updateAudioTrimUI();
   await saveAudioTrimToBackend();
 });
@@ -614,23 +681,45 @@ document.getElementById("btnAudioReset").addEventListener("click", async () => {
   pushAudioUndo();
   audioIn = 0.0;
   audioOut = audioDuration;
+  currentPlaybackRate = 1.0;
+  currentPreservePitch = true;
+  applyAudioPlaybackSpeed();
   updateAudioTrimUI();
-  if (currentSlot && currentIndex >= 0 && currentCandidates[currentIndex]) {
-    const cand = currentCandidates[currentIndex];
-    cand.audio_in = 0.0;
-    cand.audio_out = 0.0;
-    await fetch("/api/actions/trim_audio", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        slot_id: currentSlot.id,
-        sound_id: cand.sound_id,
-        audio_in: 0.0,
-        audio_out: 0.0,
-      }),
-    });
-  }
+  await saveAudioTrimToBackend();
 });
+
+document.querySelectorAll(".speed-preset-btn").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const rate = parseFloat(btn.dataset.rate);
+    if (Number.isNaN(rate)) return;
+    pushAudioUndo();
+    currentPlaybackRate = rate;
+    applyAudioPlaybackSpeed();
+    updateAudioTrimUI();
+    await saveAudioTrimToBackend();
+  });
+});
+
+if (audioRateSlider) {
+  audioRateSlider.addEventListener("input", () => {
+    currentPlaybackRate = parseFloat(audioRateSlider.value) || 1.0;
+    applyAudioPlaybackSpeed();
+    updateAudioTrimUI();
+  });
+  audioRateSlider.addEventListener("change", async () => {
+    audioRateSlider.blur();
+    await saveAudioTrimToBackend();
+  });
+}
+
+if (btnPreservePitch) {
+  btnPreservePitch.addEventListener("click", async () => {
+    pushAudioUndo();
+    currentPreservePitch = !currentPreservePitch;
+    applyAudioPlaybackSpeed();
+    await saveAudioTrimToBackend();
+  });
+}
 
 // =========================================================================
 // Scene Preview (Video + Frame-Accurate GIF Decoder) & Scene Trimmer
@@ -1274,6 +1363,9 @@ async function openOriginalSource(url, candObj = null) {
     return;
   }
 
+  // Always auto-copy the source URL to clipboard immediately when clicked!
+  copyTextToClipboard(url, btnCopySourceUrl);
+
   const title = (targetCand && targetCand.name) ? targetCand.name : "원본 출처";
 
   // 1. Inside PyWebView Desktop App: open a real native popup window directly!
@@ -1517,12 +1609,14 @@ function playCandidate(index, autoPlay = true) {
   // Decode bottom waveform & load trim boundaries
   decodeWaveformForCandidate(cand);
 
-  // Enforce normalized gain & master volume before and after loading audio
+  // Enforce normalized gain, playback speed & master volume before and after loading audio
   audioPlayer.pause();
   applyAudioGainNodes();
+  applyAudioPlaybackSpeed();
   audioPlayer.src = cand.audio_url;
   audioPlayer.onloadedmetadata = () => {
     applyAudioGainNodes();
+    applyAudioPlaybackSpeed();
     const startAt = cand.audio_in || 0.0;
     audioPlayer.currentTime = startAt;
     if (!autoPlay) {
@@ -1627,11 +1721,14 @@ function renderCandidatesQueue() {
 
     const infoDiv = document.createElement("div");
     infoDiv.className = "truncate flex-1 pr-2 min-w-0 flex items-center gap-2.5";
+    const speedPill = (c.playback_rate && Math.abs(c.playback_rate - 1.0) >= 0.01)
+      ? `<span class="ml-1.5 text-amber-300 font-bold">⚡${Number(c.playback_rate).toFixed(2)}x</span>`
+      : "";
     infoDiv.innerHTML = `
       <span class="shrink-0 bg-[#242424] text-[#1DB954] font-mono font-bold text-xs px-2 py-1 rounded border border-[#333]">#${idx + 1}</span>
       <div class="truncate min-w-0">
         <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}</div>
-        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match</div>
+        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${speedPill}</div>
       </div>
     `;
 
@@ -1934,6 +2031,7 @@ audioPlayer.addEventListener("timeupdate", () => {
 
 audioPlayer.addEventListener("play", () => {
   applyAudioGainNodes();
+  applyAudioPlaybackSpeed();
   playIcon.classList.add("hidden");
   pauseIcon.classList.remove("hidden");
 });
@@ -1975,6 +2073,7 @@ if (volumeSlider) {
 
 function togglePlayback() {
   initAudioContext();
+  applyAudioPlaybackSpeed();
   const isPlayingNow = !audioPlayer.paused || (loopMode === "sync" && sceneMediaType && sceneIsPlaying);
   if (isPlayingNow) {
     audioPlayer.pause();
@@ -1997,6 +2096,32 @@ function togglePlayback() {
       }
       audioPlayer.play().catch(() => {});
     }
+  }
+}
+
+function replayFromStart() {
+  initAudioContext();
+  applyAudioGainNodes();
+  applyAudioPlaybackSpeed();
+  if (loopMode === "sync" && sceneMediaType) {
+    sceneCurrentTime = sceneIn;
+    if (sceneMediaType === "video") {
+      sceneVideo.currentTime = sceneIn;
+      sceneVideo.play().catch(() => {});
+    }
+    sceneIsPlaying = true;
+    if (soundOffset <= 0.01) {
+      audioPlayer.currentTime = audioIn;
+      audioPlayer.play().catch(() => {});
+      audioTriggeredThisCycle = true;
+    } else {
+      audioPlayer.pause();
+      audioPlayer.currentTime = audioIn;
+      audioTriggeredThisCycle = false;
+    }
+  } else {
+    audioPlayer.currentTime = audioIn;
+    audioPlayer.play().catch(() => {});
   }
 }
 
@@ -2172,6 +2297,16 @@ async function loadSettingsFromServer() {
     if (s.right_width) document.getElementById("rightPanel").style.width = `${s.right_width}px`;
     if (s.footer_height) document.getElementById("bottomFooter").style.height = `${s.footer_height}px`;
     if (s.unity_path && !unityPathInput.value) unityPathInput.value = s.unity_path;
+    if (s.keymap_settings) {
+      try {
+        applyKeymapSettingsObject(JSON.parse(s.keymap_settings));
+      } catch (_) {}
+    } else {
+      try {
+        const localKm = localStorage.getItem("soundreels_keymap_settings");
+        if (localKm) applyKeymapSettingsObject(JSON.parse(localKm));
+      } catch (_) {}
+    }
     updateGeminiKeyBtnUI(s.has_gemini_key === "true");
     resizeWaveformCanvas();
   } catch (e) {
@@ -2316,8 +2451,155 @@ document.querySelectorAll(".dock-btn").forEach(btn => {
 });
 
 // =========================================================================
-// Keyboard Shortcuts (Reels + Scene Sync + Original Source 'O')
+// Shortcut & Playback Settings Modal + Customizable Keyboard Dispatcher
 // =========================================================================
+
+const KEYMAP_LABELS = [
+  ["playPause", "재생 / 일시정지"],
+  ["replay", "처음부터 다시 재생 (단독 키 · 스페이스 2연타와 병행)"],
+  ["prevCandidate", "이전 사운드로 넘기기 (앞)"],
+  ["nextCandidate", "다음 사운드로 넘기기 (뒤)"],
+  ["like", "찜하기"],
+  ["similar", "비슷한 소리 찾기"],
+  ["mutate", "즉석 변형"],
+  ["confirm", "최종 채택 / 확정 취소"],
+  ["loopMode", "반복 모드 전환"],
+  ["sourceLink", "원본 출처 창 열기 + 복사"],
+];
+
+function applyKeymapSettingsObject(rawObj) {
+  if (!rawObj || typeof rawObj !== "object") return;
+  keymapSettings = {
+    doubleSpaceReplay: rawObj.doubleSpaceReplay !== undefined ? !!rawObj.doubleSpaceReplay : DEFAULT_KEYMAP_SETTINGS.doubleSpaceReplay,
+    doubleSpaceWindowMs: Math.max(150, Math.min(800, parseInt(rawObj.doubleSpaceWindowMs || DEFAULT_KEYMAP_SETTINGS.doubleSpaceWindowMs, 10))),
+    arrowUpDownAlso: rawObj.arrowUpDownAlso !== undefined ? !!rawObj.arrowUpDownAlso : DEFAULT_KEYMAP_SETTINGS.arrowUpDownAlso,
+    keys: { ...DEFAULT_KEYMAP_SETTINGS.keys, ...(rawObj.keys || {}) },
+  };
+  updateShortcutTooltips();
+}
+
+function formatKeyCodeLabel(code) {
+  if (!code) return "-";
+  const map = {
+    Space: "Spacebar",
+    ArrowLeft: "← Left",
+    ArrowRight: "→ Right",
+    ArrowUp: "↑ Up",
+    ArrowDown: "↓ Down",
+    Enter: "Enter",
+  };
+  if (map[code]) return map[code];
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  return code;
+}
+
+function updateShortcutTooltips() {
+  const k = keymapSettings.keys;
+  const btnPlayEl = document.getElementById("btnPlay");
+  if (btnPlayEl) {
+    const dbl = keymapSettings.doubleSpaceReplay ? " · 2연타: 처음부터 다시 재생" : "";
+    btnPlayEl.title = `재생 / 일시정지 (${formatKeyCodeLabel(k.playPause)}${dbl})`;
+  }
+  const btnPrevEl = document.getElementById("btnPrev");
+  if (btnPrevEl) btnPrevEl.title = `이전 사운드 (${formatKeyCodeLabel(k.prevCandidate)})`;
+  const btnNextEl = document.getElementById("btnNext");
+  if (btnNextEl) btnNextEl.title = `다음 사운드 (${formatKeyCodeLabel(k.nextCandidate)})`;
+}
+
+const settingsModal = document.getElementById("settingsModal");
+const chkDoubleSpaceReplay = document.getElementById("chkDoubleSpaceReplay");
+const doubleSpaceWindowMsInput = document.getElementById("doubleSpaceWindowMs");
+const chkArrowUpDownAlso = document.getElementById("chkArrowUpDownAlso");
+const keymapRowsEl = document.getElementById("keymapRows");
+const keyCaptureHintEl = document.getElementById("keyCaptureHint");
+let draftKeymapSettings = null;
+
+function renderKeymapRows() {
+  if (!keymapRowsEl || !draftKeymapSettings) return;
+  keymapRowsEl.innerHTML = "";
+  KEYMAP_LABELS.forEach(([actionKey, label]) => {
+    const row = document.createElement("div");
+    row.className = "flex items-center justify-between bg-[#121212] border border-[#2a2a2a] rounded-lg px-3 py-2 text-xs";
+
+    const span = document.createElement("span");
+    span.className = "text-gray-200 font-medium";
+    span.textContent = label;
+
+    const btn = document.createElement("button");
+    const isCapturing = capturingKeyAction === actionKey;
+    btn.className = isCapturing
+      ? "px-3 py-1 rounded bg-amber-500 text-black font-black min-w-[96px] text-center animate-pulse"
+      : "px-3 py-1 rounded bg-[#242424] hover:bg-[#333] text-emerald-300 border border-[#383838] font-mono font-bold min-w-[96px] text-center";
+    btn.textContent = isCapturing ? "입력 대기 중..." : formatKeyCodeLabel(draftKeymapSettings.keys[actionKey]);
+    btn.addEventListener("click", () => {
+      capturingKeyAction = actionKey;
+      if (keyCaptureHintEl) keyCaptureHintEl.classList.remove("hidden");
+      renderKeymapRows();
+    });
+
+    row.appendChild(span);
+    row.appendChild(btn);
+    keymapRowsEl.appendChild(row);
+  });
+}
+
+function openSettingsModal() {
+  if (!settingsModal) return;
+  draftKeymapSettings = JSON.parse(JSON.stringify(keymapSettings));
+  capturingKeyAction = null;
+  if (keyCaptureHintEl) keyCaptureHintEl.classList.add("hidden");
+  if (chkDoubleSpaceReplay) chkDoubleSpaceReplay.checked = !!draftKeymapSettings.doubleSpaceReplay;
+  if (doubleSpaceWindowMsInput) doubleSpaceWindowMsInput.value = draftKeymapSettings.doubleSpaceWindowMs || 320;
+  if (chkArrowUpDownAlso) chkArrowUpDownAlso.checked = !!draftKeymapSettings.arrowUpDownAlso;
+  renderKeymapRows();
+  settingsModal.classList.remove("hidden");
+}
+
+function closeSettingsModal() {
+  capturingKeyAction = null;
+  if (keyCaptureHintEl) keyCaptureHintEl.classList.add("hidden");
+  if (settingsModal) settingsModal.classList.add("hidden");
+}
+
+if (document.getElementById("btnOpenSettings")) {
+  document.getElementById("btnOpenSettings").addEventListener("click", openSettingsModal);
+}
+if (document.getElementById("btnCloseSettingsModal")) {
+  document.getElementById("btnCloseSettingsModal").addEventListener("click", closeSettingsModal);
+}
+if (document.getElementById("btnCloseSettingsBottom")) {
+  document.getElementById("btnCloseSettingsBottom").addEventListener("click", closeSettingsModal);
+}
+if (settingsModal) {
+  settingsModal.addEventListener("click", (e) => {
+    if (e.target === settingsModal) closeSettingsModal();
+  });
+}
+if (document.getElementById("btnResetSettings")) {
+  document.getElementById("btnResetSettings").addEventListener("click", () => {
+    draftKeymapSettings = JSON.parse(JSON.stringify(DEFAULT_KEYMAP_SETTINGS));
+    if (chkDoubleSpaceReplay) chkDoubleSpaceReplay.checked = draftKeymapSettings.doubleSpaceReplay;
+    if (doubleSpaceWindowMsInput) doubleSpaceWindowMsInput.value = draftKeymapSettings.doubleSpaceWindowMs;
+    if (chkArrowUpDownAlso) chkArrowUpDownAlso.checked = draftKeymapSettings.arrowUpDownAlso;
+    capturingKeyAction = null;
+    if (keyCaptureHintEl) keyCaptureHintEl.classList.add("hidden");
+    renderKeymapRows();
+  });
+}
+if (document.getElementById("btnSaveSettingsModal")) {
+  document.getElementById("btnSaveSettingsModal").addEventListener("click", async () => {
+    if (!draftKeymapSettings) return;
+    draftKeymapSettings.doubleSpaceReplay = chkDoubleSpaceReplay ? !!chkDoubleSpaceReplay.checked : true;
+    draftKeymapSettings.doubleSpaceWindowMs = Math.max(150, Math.min(800, parseInt(doubleSpaceWindowMsInput?.value || "320", 10) || 320));
+    draftKeymapSettings.arrowUpDownAlso = chkArrowUpDownAlso ? !!chkArrowUpDownAlso.checked : true;
+    applyKeymapSettingsObject(draftKeymapSettings);
+    const serialized = JSON.stringify(keymapSettings);
+    localStorage.setItem("soundreels_keymap_settings", serialized);
+    await saveSetting("keymap_settings", serialized);
+    closeSettingsModal();
+  });
+}
 
 function isTextEditingTarget(target) {
   if (!target) return false;
@@ -2330,7 +2612,7 @@ function isTextEditingTarget(target) {
 }
 
 // Prevent mouse clicks on buttons/range bars from trapping Spacebar focus
-document.addEventListener("mouseup", (e) => {
+document.addEventListener("mouseup", () => {
   const active = document.activeElement;
   if (!active || active === document.body) return;
   if (active.tagName === "BUTTON" || (active.tagName === "INPUT" && active.type === "range")) {
@@ -2339,41 +2621,81 @@ document.addEventListener("mouseup", (e) => {
 });
 
 window.addEventListener("keydown", (e) => {
+  // Handle shortcut key capture inside Settings Modal first
+  if (capturingKeyAction && settingsModal && !settingsModal.classList.contains("hidden")) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      capturingKeyAction = null;
+      if (keyCaptureHintEl) keyCaptureHintEl.classList.add("hidden");
+      renderKeymapRows();
+      return;
+    }
+    if (!["ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"].includes(e.code)) {
+      draftKeymapSettings.keys[capturingKeyAction] = e.code;
+      capturingKeyAction = null;
+      if (keyCaptureHintEl) keyCaptureHintEl.classList.add("hidden");
+      renderKeymapRows();
+    }
+    return;
+  }
+
+  if (e.key === "Escape") {
+    closeSettingsModal();
+    closeSourceInfoModal();
+    return;
+  }
+
+  if (settingsModal && !settingsModal.classList.contains("hidden")) return;
   if (isTextEditingTarget(e.target)) return;
 
-  if (e.key === "ArrowDown" || e.key === "j" || e.key === "J") {
-    e.preventDefault();
-    if (currentIndex + 1 < currentCandidates.length) playCandidate(currentIndex + 1);
-  } else if (e.key === "ArrowUp" || e.key === "k" || e.key === "K") {
-    e.preventDefault();
-    if (currentIndex - 1 >= 0) playCandidate(currentIndex - 1);
-  } else if (e.key === " " || e.code === "Space") {
+  const code = e.code || e.key;
+  const k = keymapSettings.keys;
+
+  if (code === k.playPause || (k.playPause === "Space" && (e.key === " " || e.code === "Space"))) {
     e.preventDefault();
     e.stopPropagation();
     if (document.activeElement && document.activeElement !== document.body && !isTextEditingTarget(document.activeElement)) {
       document.activeElement.blur();
     }
-    if (!e.repeat) togglePlayback();
-  } else if (e.key === "s" || e.key === "S") {
+    if (!e.repeat) {
+      const now = performance.now();
+      const winMs = keymapSettings.doubleSpaceWindowMs || 320;
+      if (keymapSettings.doubleSpaceReplay && lastSpacePressAt > 0 && (now - lastSpacePressAt) <= winMs) {
+        lastSpacePressAt = 0;
+        replayFromStart();
+      } else {
+        lastSpacePressAt = now;
+        togglePlayback();
+      }
+    }
+  } else if (code === k.replay) {
+    e.preventDefault();
+    if (!e.repeat) replayFromStart();
+  } else if (code === k.nextCandidate || (keymapSettings.arrowUpDownAlso && (e.key === "ArrowDown" || e.code === "KeyJ"))) {
+    e.preventDefault();
+    if (currentIndex + 1 < currentCandidates.length) playCandidate(currentIndex + 1);
+  } else if (code === k.prevCandidate || (keymapSettings.arrowUpDownAlso && (e.key === "ArrowUp" || e.code === "KeyK"))) {
+    e.preventDefault();
+    if (currentIndex - 1 >= 0) playCandidate(currentIndex - 1);
+  } else if (code === k.like) {
     e.preventDefault();
     toggleLikeCurrent();
-  } else if (e.key === "f" || e.key === "F") {
+  } else if (code === k.similar) {
     e.preventDefault();
     triggerSimilarCurrent();
-  } else if (e.key === "m" || e.key === "M") {
+  } else if (code === k.mutate) {
     e.preventDefault();
     triggerMutateCurrent();
-  } else if (e.key === "Escape") {
-    closeSourceInfoModal();
-  } else if (e.key === "o" || e.key === "O") {
+  } else if (code === k.sourceLink) {
     e.preventDefault();
     const cand = currentIndex >= 0 ? currentCandidates[currentIndex] : null;
     const url = btnOpenSourceUrl.dataset.url;
     if (url || cand) openOriginalSource(url, cand);
-  } else if (e.key === "Enter") {
+  } else if (code === k.confirm) {
     e.preventDefault();
     confirmCurrent();
-  } else if (e.key === "l" || e.key === "L") {
+  } else if (code === k.loopMode) {
     e.preventDefault();
     cycleLoopMode();
   } else if (["1", "2", "3", "4", "5"].includes(e.key)) {
@@ -2384,7 +2706,8 @@ window.addEventListener("keydown", (e) => {
 }, true);
 
 window.addEventListener("keyup", (e) => {
-  if ((e.key === " " || e.code === "Space") && !isTextEditingTarget(e.target)) {
+  const playCode = keymapSettings.keys.playPause;
+  if ((e.key === " " || e.code === "Space" || e.code === playCode) && !isTextEditingTarget(e.target)) {
     e.preventDefault();
     e.stopPropagation();
   }
