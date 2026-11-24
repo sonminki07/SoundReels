@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SoundReels — Game SFX Explorer</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="style.css?v=1.2">
+  <link rel="stylesheet" href="style.css?v=1.21">
 </head>
 <body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans">
 
@@ -131,17 +131,27 @@
         </div>
 
         <!-- Scene Clip Trim Bar (Visible when scene media is loaded) -->
-        <div id="sceneTrimBar" class="hidden bg-[#121212]/90 border border-[#2b2b2b] rounded-lg px-3 py-1.5 flex flex-col gap-1 shrink-0">
+        <div id="sceneTrimBar" class="hidden bg-[#121212]/95 border border-amber-900/50 rounded-lg px-3 py-2 flex flex-col gap-1.5 shrink-0">
           <div class="flex items-center justify-between text-[11px] font-mono text-gray-300 gap-2">
-            <span class="text-amber-400 font-bold shrink-0">🎞️ 장면 편집</span>
-            <div class="flex-1 flex items-center gap-2">
-              <span id="sceneTimeLabel" class="text-gray-400 w-24 shrink-0">0.00s / 0.00s</span>
-              <div class="relative flex-1 h-4 flex items-center">
-                <canvas id="sceneTimelineCanvas" class="w-full h-3 rounded bg-[#242424] cursor-pointer"></canvas>
-              </div>
-              <span id="sceneTrimLabel" class="text-emerald-400 shrink-0">구간: 전체</span>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <button id="btnScenePlayPause" title="영상/GIF 재생 또는 일시정지" class="px-1.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-amber-400 font-bold border border-[#383838]">⏯</button>
+              <span class="text-amber-400 font-bold">🎞️ 영상/GIF 구간 편집</span>
+            </div>
+            <span id="sceneTimeLabel" class="text-gray-400">0.00s / 0.00s</span>
+            <span id="sceneTrimLabel" class="text-emerald-400 font-semibold">구간: 전체</span>
+          </div>
+
+          <!-- Draggable Scene Timeline -->
+          <div class="relative w-full h-6 bg-[#1b1b1b] rounded border border-[#333] overflow-hidden select-none">
+            <canvas id="sceneTimelineCanvas" class="w-full h-full cursor-pointer"></canvas>
+            <div id="sceneInHandle" title="영상/GIF 시작점 드래그" class="trim-handle left-handle" style="left: 0%;">
+              <div class="trim-grip bg-amber-400"></div>
+            </div>
+            <div id="sceneOutHandle" title="영상/GIF 끝점 드래그" class="trim-handle right-handle" style="left: 100%;">
+              <div class="trim-grip bg-amber-400"></div>
             </div>
           </div>
+
           <div class="flex items-center justify-between text-[11px] gap-1">
             <div class="flex items-center gap-1.5 text-gray-400">
               <span>소리 딜레이:</span>
@@ -150,11 +160,11 @@
               <span>초</span>
             </div>
             <div class="flex items-center gap-1">
-              <button id="btnSceneSetIn" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">📍 시작점</button>
-              <button id="btnSceneSetOut" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🏁 끝점</button>
-              <button id="btnSceneApply" class="px-2 py-0.5 rounded bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 font-semibold">✂️ 자르기</button>
-              <button id="btnSceneUndo" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">↩ 되돌리기</button>
-              <button id="btnSceneReset" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-400 border border-[#383838]">🔄 원본</button>
+              <button id="btnSceneSetIn" title="현재 영상 위치를 시작점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">📍 시작점</button>
+              <button id="btnSceneSetOut" title="현재 영상 위치를 끝점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🏁 끝점</button>
+              <button id="btnSceneApply" title="설정한 구간으로 자르기 적용" class="px-2 py-0.5 rounded bg-amber-900/70 hover:bg-amber-800 text-amber-200 border border-amber-700 font-semibold">✂️ 자르기</button>
+              <button id="btnSceneUndo" title="직전 구간으로 되돌리기" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">↩ 되돌리기</button>
+              <button id="btnSceneReset" title="영상/GIF 원본 구간으로 복구" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-400 border border-[#383838]">🔄 원본</button>
             </div>
           </div>
         </div>
@@ -226,28 +236,33 @@
           <span id="timeDuration">0:00</span>
         </div>
 
-        <!-- Audio Waveform & In/Out Trimmer Panel (Directly below seek bar) -->
-        <div id="waveformPanel" class="pt-1 border-t border-[#262626] flex flex-col gap-1.5">
-          <div class="relative w-full h-16 bg-[#101010] rounded-lg border border-[#2a2a2a] overflow-hidden select-none">
+        <!-- Audio Waveform Display (Always visible below seek bar; trimming controls collapsed by default) -->
+        <div id="waveformPanel" class="pt-1 border-t border-[#262626] flex flex-col gap-1">
+          <div class="relative w-full h-14 bg-[#101010] rounded-lg border border-[#2a2a2a] overflow-hidden select-none">
             <canvas id="audioWaveformCanvas" class="w-full h-full cursor-crosshair"></canvas>
-            <!-- Visual In / Out Handle Indicators -->
-            <div id="audioInHandle" title="소리 시작점 드래그" class="trim-handle left-handle" style="left: 0%;">
+            <!-- Visual In / Out Handle Indicators (hidden until expanded) -->
+            <div id="audioInHandle" title="소리 시작점 드래그" class="trim-handle left-handle hidden" style="left: 0%;">
               <div class="trim-grip bg-emerald-400"></div>
             </div>
-            <div id="audioOutHandle" title="소리 끝점 드래그" class="trim-handle right-handle" style="left: 100%;">
+            <div id="audioOutHandle" title="소리 끝점 드래그" class="trim-handle right-handle hidden" style="left: 100%;">
               <div class="trim-grip bg-emerald-400"></div>
             </div>
           </div>
 
           <div class="flex items-center justify-between text-[11px] font-mono">
-            <span id="audioTrimRangeLabel" class="text-emerald-400">구간: 전체 (0.00s ~ 0.00s)</span>
-            <div class="flex items-center gap-1.5">
-              <button id="btnAudioSetIn" title="현재 재생 위치를 시작점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">📍 시작점</button>
-              <button id="btnAudioSetOut" title="현재 재생 위치를 끝점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🏁 끝점</button>
-              <button id="btnAudioApply" title="선택한 오디오 구간 저장 (Unity 내보내기 시 이 구간으로 잘림)" class="px-2 py-0.5 rounded bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 font-semibold">✂️ 자르기</button>
-              <button id="btnAudioUndo" title="이전 오디오 구간으로 되돌리기" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">↩ 되돌리기</button>
-              <button id="btnAudioReset" title="오디오 원본 길이로 초기화" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-400 border border-[#383838]">🔄 원본</button>
-            </div>
+            <span id="audioTrimRangeLabel" class="text-gray-400">구간: 전체 (0.00s ~ 0.00s)</span>
+            <button id="btnToggleAudioTrim" class="px-2 py-0.5 rounded bg-[#202020] hover:bg-[#2c2c2c] text-gray-400 hover:text-gray-200 border border-[#333] transition">
+              ✂️ 소리 파형 편집 ▸
+            </button>
+          </div>
+
+          <!-- Collapsible Audio Trimming Toolbar (Hidden by default) -->
+          <div id="audioTrimControls" class="hidden flex items-center justify-end gap-1.5 pt-1 text-[11px] font-mono">
+            <button id="btnAudioSetIn" title="현재 재생 위치를 시작점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">📍 시작점</button>
+            <button id="btnAudioSetOut" title="현재 재생 위치를 끝점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🏁 끝점</button>
+            <button id="btnAudioApply" title="선택한 오디오 구간 저장" class="px-2 py-0.5 rounded bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 font-semibold">✂️ 자르기</button>
+            <button id="btnAudioUndo" title="이전 오디오 구간으로 되돌리기" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">↩ 되돌리기</button>
+            <button id="btnAudioReset" title="오디오 원본 길이로 초기화" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-400 border border-[#383838]">🔄 원본</button>
           </div>
         </div>
       </div>
@@ -326,6 +341,6 @@
   <!-- Hidden Native Audio Element -->
   <audio id="audioPlayer"></audio>
 
-  <script src="app.js?v=1.2"></script>
+  <script src="app.js?v=1.21"></script>
 </body>
 </html>

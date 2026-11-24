@@ -71,6 +71,8 @@ const audioWaveformCtx = audioWaveformCanvas.getContext("2d");
 const audioInHandle = document.getElementById("audioInHandle");
 const audioOutHandle = document.getElementById("audioOutHandle");
 const audioTrimRangeLabel = document.getElementById("audioTrimRangeLabel");
+const audioTrimControls = document.getElementById("audioTrimControls");
+const btnToggleAudioTrim = document.getElementById("btnToggleAudioTrim");
 
 // Scene Elements
 const sceneStage = document.getElementById("sceneStage");
@@ -83,10 +85,15 @@ const sceneFileInput = document.getElementById("sceneFileInput");
 const sceneTrimBar = document.getElementById("sceneTrimBar");
 const sceneTimelineCanvas = document.getElementById("sceneTimelineCanvas");
 const sceneTimelineCtx = sceneTimelineCanvas.getContext("2d");
+const sceneInHandle = document.getElementById("sceneInHandle");
+const sceneOutHandle = document.getElementById("sceneOutHandle");
 const sceneTimeLabel = document.getElementById("sceneTimeLabel");
 const sceneTrimLabel = document.getElementById("sceneTrimLabel");
 const soundOffsetInput = document.getElementById("soundOffsetInput");
 const btnDeleteScene = document.getElementById("btnDeleteScene");
+const btnScenePlayPause = document.getElementById("btnScenePlayPause");
+
+let isDraggingSceneHandle = null; // 'in' | 'out' | 'scrub' | null
 
 const unityPathInput = document.getElementById("unityPathInput");
 
@@ -443,6 +450,14 @@ function scrubAudioByEvent(e) {
   audioPlayer.currentTime = ratio * audioDuration;
 }
 
+// Audio Trim Collapsible Toggle (Collapsed by default)
+btnToggleAudioTrim.addEventListener("click", () => {
+  const isHidden = audioTrimControls.classList.toggle("hidden");
+  audioInHandle.classList.toggle("hidden", isHidden);
+  audioOutHandle.classList.toggle("hidden", isHidden);
+  btnToggleAudioTrim.textContent = isHidden ? "✂️ 소리 파형 편집 ▸" : "✂️ 소리 파형 접기 ▾";
+});
+
 // Audio Trim Buttons
 document.getElementById("btnAudioSetIn").addEventListener("click", () => {
   if (audioDuration <= 0) return;
@@ -657,18 +672,20 @@ function drawSceneTimeline() {
   const outR = Math.max(inR, Math.min(1, (sceneOut > 0 ? sceneOut : sceneDuration) / sceneDuration));
   const curR = Math.max(0, Math.min(1, sceneCurrentTime / sceneDuration));
 
-  // Background track
-  sceneTimelineCtx.fillStyle = "#262626";
+  // Background dimmed cut zones
+  sceneTimelineCtx.fillStyle = "#181818";
   sceneTimelineCtx.fillRect(0, 0, w, h);
 
   // Active trimmed window
-  sceneTimelineCtx.fillStyle = "#1DB954";
+  sceneTimelineCtx.fillStyle = "rgba(245, 158, 11, 0.35)";
   sceneTimelineCtx.fillRect(inR * w, 0, Math.max(2, (outR - inR) * w), h);
+  sceneTimelineCtx.fillStyle = "#1DB954";
+  sceneTimelineCtx.fillRect(inR * w, h - 4, Math.max(2, (outR - inR) * w), 4);
 
   // Sound offset pin if > 0
   if (soundOffset > 0) {
     const trigR = Math.min(1, (sceneIn + soundOffset) / sceneDuration);
-    sceneTimelineCtx.fillStyle = "#f59e0b";
+    sceneTimelineCtx.fillStyle = "#38bdf8";
     sceneTimelineCtx.fillRect(trigR * w - 1, 0, 2, h);
   }
 
@@ -681,6 +698,10 @@ function drawSceneTimeline() {
 
 function updateSceneTrimUI() {
   const effectiveOut = sceneOut > 0 ? sceneOut : sceneDuration;
+  const dur = sceneDuration || 1;
+  sceneInHandle.style.left = `${Math.max(0, Math.min(100, (sceneIn / dur) * 100))}%`;
+  sceneOutHandle.style.left = `${Math.max(0, Math.min(100, (effectiveOut / dur) * 100))}%`;
+
   const isFull = sceneIn <= 0.01 && Math.abs(effectiveOut - sceneDuration) <= 0.05;
   sceneTrimLabel.textContent = isFull
     ? "구간: 전체"
@@ -796,8 +817,73 @@ btnDeleteScene.addEventListener("click", async (e) => {
   resetSceneUI();
 });
 
-// Scene Timeline Scrub & Trim Controls
+// Scene Timeline Scrub, Handle Drag & Trim Controls
+btnScenePlayPause.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!sceneMediaType) return;
+  sceneIsPlaying = !sceneIsPlaying;
+  if (sceneMediaType === "video") {
+    if (sceneIsPlaying) sceneVideo.play().catch(() => {});
+    else sceneVideo.pause();
+  }
+});
+
+sceneInHandle.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  if (sceneDuration <= 0) return;
+  pushSceneUndo();
+  isDraggingSceneHandle = "in";
+  sceneInHandle.classList.add("dragging");
+});
+
+sceneOutHandle.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  if (sceneDuration <= 0) return;
+  pushSceneUndo();
+  isDraggingSceneHandle = "out";
+  sceneOutHandle.classList.add("dragging");
+});
+
 sceneTimelineCanvas.addEventListener("pointerdown", (e) => {
+  if (sceneDuration <= 0) return;
+  isDraggingSceneHandle = "scrub";
+  scrubSceneByEvent(e);
+});
+
+window.addEventListener("pointermove", (e) => {
+  if (!isDraggingSceneHandle || sceneDuration <= 0) return;
+  const rect = sceneTimelineCanvas.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const t = ratio * sceneDuration;
+  const effectiveOut = sceneOut > 0 ? sceneOut : sceneDuration;
+
+  if (isDraggingSceneHandle === "in") {
+    sceneIn = Math.min(t, Math.max(0, effectiveOut - 0.05));
+    sceneCurrentTime = sceneIn;
+    if (sceneMediaType === "video") sceneVideo.currentTime = sceneIn;
+    else if (sceneMediaType === "gif") drawGifFrameAt(sceneIn);
+    updateSceneTrimUI();
+  } else if (isDraggingSceneHandle === "out") {
+    sceneOut = Math.max(t, Math.min(sceneDuration, sceneIn + 0.05));
+    sceneCurrentTime = sceneOut;
+    if (sceneMediaType === "video") sceneVideo.currentTime = sceneOut;
+    else if (sceneMediaType === "gif") drawGifFrameAt(sceneOut);
+    updateSceneTrimUI();
+  } else if (isDraggingSceneHandle === "scrub") {
+    scrubSceneByEvent(e);
+  }
+});
+
+window.addEventListener("pointerup", () => {
+  if (isDraggingSceneHandle === "in" || isDraggingSceneHandle === "out") {
+    sceneInHandle.classList.remove("dragging");
+    sceneOutHandle.classList.remove("dragging");
+    saveSceneTrimToBackend();
+  }
+  isDraggingSceneHandle = null;
+});
+
+function scrubSceneByEvent(e) {
   if (sceneDuration <= 0) return;
   const rect = sceneTimelineCanvas.getBoundingClientRect();
   const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -809,7 +895,7 @@ sceneTimelineCanvas.addEventListener("pointerdown", (e) => {
     drawGifFrameAt(target);
   }
   drawSceneTimeline();
-});
+}
 
 document.getElementById("btnSceneSetIn").addEventListener("click", () => {
   if (sceneDuration <= 0) return;
