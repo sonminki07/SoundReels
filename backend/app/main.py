@@ -167,6 +167,17 @@ class AudioTrimRequest(BaseModel):
 class OpenExternalRequest(BaseModel):
     url: str
 
+class ManualSearchRequest(BaseModel):
+    query: str
+    max_dur: Optional[float] = Field(default=None, ge=0.0)
+    limit: int = Field(default=30, ge=1, le=60)
+
+class ImportUrlRequest(BaseModel):
+    url: str
+
+class ActiveSlotRequest(BaseModel):
+    slot_id: str
+
 @app.on_event("startup")
 def on_startup():
     init_db()
@@ -175,6 +186,9 @@ def on_startup():
         c.execute("SELECT COUNT(*) FROM slots")
         if c.fetchone()[0] == 0:
             seed_project_and_slots()
+    # Warm up CLAP model in background so first search/import responds immediately
+    import threading
+    threading.Thread(target=get_scout, daemon=True).start()
 
 # --- Helper: Audio Processing on Export (Trim + Silence Trim + -1dBFS Peak Normalization) ---
 def export_processed_audio_to_unity(
@@ -262,7 +276,8 @@ def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
             SELECT s.*, 
                    COUNT(CASE WHEN sc.status != 'skipped' AND snd.duration <= ? THEN sc.id END) as candidate_count,
                    SUM(CASE WHEN sc.status = 'liked' AND snd.duration <= ? THEN 1 ELSE 0 END) as liked_count,
-                   SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count
+                   SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count,
+                   SUM(CASE WHEN sc.status = 'skipped' THEN 1 ELSE 0 END) as trash_count
             FROM slots s
             LEFT JOIN slot_candidates sc ON s.id = sc.slot_id
             LEFT JOIN sounds snd ON sc.sound_id = snd.id
@@ -274,7 +289,8 @@ def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
             SELECT s.*, 
                    COUNT(CASE WHEN sc.status != 'skipped' THEN sc.id END) as candidate_count,
                    SUM(CASE WHEN sc.status = 'liked' THEN 1 ELSE 0 END) as liked_count,
-                   SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count
+                   SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count,
+                   SUM(CASE WHEN sc.status = 'skipped' THEN 1 ELSE 0 END) as trash_count
             FROM slots s
             LEFT JOIN slot_candidates sc ON s.id = sc.slot_id
             GROUP BY s.id
@@ -364,6 +380,8 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
 
 class RescoutRequest(BaseModel):
     max_dur: Optional[float] = Field(default=None, ge=0.0)
+    include_freesound: bool = False
+    target_count: int = Field(default=24, ge=8, le=60)
 
 class SceneScoutRequest(BaseModel):
     scene_in: Optional[float] = Field(default=None, ge=0.0)
@@ -373,7 +391,7 @@ class SceneScoutRequest(BaseModel):
 
 @app.post("/api/slots/{slot_id}/rescout")
 def rescout_slot_with_duration(slot_id: str, req: RescoutRequest):
-    """Re-searches LotsOfSounds and scores with CLAP under the user's max duration constraint."""
+    """Re-searches LotsOfSounds (+ optional Freesound CC0 bulk) and scores with CLAP."""
     validate_id(slot_id, "slot_id")
     scout = get_scout()
     max_d = req.max_dur if (req.max_dur and req.max_dur > 0) else None
@@ -383,6 +401,8 @@ def rescout_slot_with_duration(slot_id: str, req: RescoutRequest):
         max_duration=max_d,
         allow_on_hold=True,
         prioritize_by_score=True,
+        include_freesound=bool(req.include_freesound),
+        max_total_insert=req.target_count,
     )
     return {"status": "ok", "slot_id": slot_id, "found_count": found_count}
 
@@ -1204,6 +1224,132 @@ def batch_export_to_unity(req: BatchExportRequest):
         "receipt_json_path": str(receipt_json_path),
         "receipt_text": receipt_bundle["receipt_text"],
     }
+
+# --- Trash / Restore, Manual Search, URL Import & Desktop Popup Bridge (v2.2) ---
+_desktop_popup_state: Dict[str, Any] = {
+    "active_slot_id": None,
+    "import_seq": 0,
+    "last_imported": None,
+}
+
+@app.get("/api/slots/{slot_id}/trash")
+def get_slot_trash(slot_id: str):
+    validate_id(slot_id, "slot_id")
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("""
+        SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
+               COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+               COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
+               COALESCE(snd.norm_gain, 1.0) as norm_gain
+        FROM slot_candidates sc
+        JOIN sounds snd ON sc.sound_id = snd.id
+        WHERE sc.slot_id = ? AND sc.status = 'skipped'
+        ORDER BY sc.id DESC
+        """, (slot_id,))
+        trash_items = []
+        for r in c.fetchall():
+            item = dict(r)
+            item["tags"] = json.loads(item.get("tags") or "[]")
+            item["audio_url"] = f"/api/sounds/{item['sound_id']}/audio"
+            urls = resolve_source_urls(item)
+            item["source_kind"] = urls["source_kind"]
+            item["original_source_url"] = urls["original_source_url"]
+            item["catalog_url"] = urls["catalog_url"]
+            trash_items.append(item)
+    return {"slot_id": slot_id, "trash": trash_items}
+
+@app.post("/api/actions/restore")
+def restore_candidate(req: ActionRequest):
+    validate_id(req.slot_id, "slot_id")
+    validate_id(req.sound_id, "sound_id")
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COALESCE(MAX(rank), 0) + 1 FROM slot_candidates WHERE slot_id = ? AND status != 'skipped'", (req.slot_id,))
+        next_rank = c.fetchone()[0]
+        c.execute("""
+        UPDATE slot_candidates
+        SET status = 'pending', rank = ?
+        WHERE slot_id = ? AND sound_id = ? AND status = 'skipped'
+        """, (next_rank, req.slot_id, req.sound_id))
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Deleted candidate not found in trash")
+        c.execute("UPDATE slots SET status = 'has_candidates' WHERE id = ? AND status = 'pending'", (req.slot_id,))
+        conn.commit()
+    return {"status": "ok", "action": "restored", "sound_id": req.sound_id}
+
+@app.post("/api/slots/{slot_id}/trash/restore_all")
+def restore_all_trash(slot_id: str):
+    validate_id(slot_id, "slot_id")
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE slot_candidates SET status = 'pending' WHERE slot_id = ? AND status = 'skipped'", (slot_id,))
+        restored_count = c.rowcount
+        if restored_count > 0:
+            c.execute("UPDATE slots SET status = 'has_candidates' WHERE id = ? AND status = 'pending'", (slot_id,))
+        conn.commit()
+    return {"status": "ok", "slot_id": slot_id, "restored_count": restored_count}
+
+@app.post("/api/slots/{slot_id}/manual_search")
+def manual_search_sounds(slot_id: str, req: ManualSearchRequest):
+    validate_id(slot_id, "slot_id")
+    q = (req.query or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="검색어를 입력하세요")
+    scout = get_scout()
+    max_d = req.max_dur if (req.max_dur and req.max_dur > 0) else None
+    result = scout.manual_search_into_slot(slot_id, q, max_duration=max_d, limit=req.limit)
+    return {"status": "ok", "slot_id": slot_id, "query": q, **result}
+
+@app.post("/api/slots/{slot_id}/import_url")
+def import_url_sounds(slot_id: str, req: ImportUrlRequest):
+    validate_id(slot_id, "slot_id")
+    scout = get_scout()
+    try:
+        result = scout.import_url_into_slot(slot_id, req.url)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"URL 가져오기 실패: {exc}")
+    return {"status": "ok", "slot_id": slot_id, "url": req.url, **result}
+
+@app.post("/api/system/active_slot")
+def set_active_slot(req: ActiveSlotRequest):
+    validate_id(req.slot_id, "slot_id")
+    _desktop_popup_state["active_slot_id"] = req.slot_id
+    return {"status": "ok", "active_slot_id": req.slot_id}
+
+@app.get("/api/desktop/popup_state")
+def get_popup_state():
+    return dict(_desktop_popup_state)
+
+@app.post("/api/desktop/popup_import")
+def popup_import_url(req: ImportUrlRequest):
+    target_slot_id = _desktop_popup_state.get("active_slot_id")
+    if not target_slot_id:
+        with get_db_context() as conn:
+            c = conn.cursor()
+            c.execute("SELECT id FROM slots ORDER BY created_at ASC LIMIT 1")
+            row = c.fetchone()
+            target_slot_id = row["id"] if row else None
+    if not target_slot_id:
+        raise HTTPException(status_code=400, detail="활성 슬롯이 없습니다.")
+    scout = get_scout()
+    try:
+        result = scout.import_url_into_slot(target_slot_id, req.url)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"팝업 URL 가져오기 실패: {exc}")
+
+    _desktop_popup_state["import_seq"] += 1
+    _desktop_popup_state["last_imported"] = {
+        "slot_id": target_slot_id,
+        "url": req.url,
+        **result,
+    }
+    return {"status": "ok", "seq": _desktop_popup_state["import_seq"], "slot_id": target_slot_id, **result}
 
 # Mount static files for Frontend
 STATIC_DIR = Path(__file__).resolve().parent / "static"

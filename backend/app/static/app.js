@@ -12,6 +12,12 @@ let similarAnchorSoundId = null;
 const similarRoundStatusBySlot = {}; // { [slotId]: { roundNo, foundNew, totalRanked, promptUsed, queriesUsed } }
 let similarClickTimer = null;
 const slotCompareDocks = {}; // { [slotId]: [sound|null, ...] }
+let topSearchMode = "sound"; // 'sound' | 'slot'
+let currentTrash = [];
+let activeAudioPoint = "playhead"; // 'playhead' | 'in' | 'out'
+let audioNudgeSaveTimer = null;
+let audioNudgeStopTimer = null;
+let lastPopupImportSeq = 0;
 
 // Full-Screen Pre-Export Review Mode State
 let isReviewMode = false;
@@ -602,11 +608,93 @@ async function saveAudioTrimToBackend() {
   }
 }
 
+function setActiveAudioPoint(point) {
+  const isTrimOpen = audioTrimControls && !audioTrimControls.classList.contains("hidden");
+  activeAudioPoint = (isTrimOpen && (point === "in" || point === "out")) ? point : "playhead";
+
+  if (audioInHandle) {
+    audioInHandle.classList.toggle("ring-2", activeAudioPoint === "in");
+    audioInHandle.classList.toggle("ring-cyan-400", activeAudioPoint === "in");
+  }
+  if (audioOutHandle) {
+    audioOutHandle.classList.toggle("ring-2", activeAudioPoint === "out");
+    audioOutHandle.classList.toggle("ring-amber-400", activeAudioPoint === "out");
+  }
+
+  const badge = document.getElementById("audioNudgePointBadge");
+  if (badge) {
+    if (activeAudioPoint === "in") {
+      badge.textContent = "📍 시작점 이동 (A/D ±0.05s)";
+      badge.className = "px-2 py-0.5 rounded bg-emerald-950/70 border border-emerald-700 text-[10px] text-emerald-300 shrink-0";
+    } else if (activeAudioPoint === "out") {
+      badge.textContent = "🏁 끝점 이동 (A/D ±0.05s)";
+      badge.className = "px-2 py-0.5 rounded bg-amber-950/70 border border-amber-700 text-[10px] text-amber-300 shrink-0";
+    } else {
+      badge.textContent = "🎯 재생위치 (A/D ±0.05s)";
+      badge.className = "px-2 py-0.5 rounded bg-[#1d1d1d] border border-[#333] text-[10px] text-cyan-300 shrink-0";
+    }
+  }
+}
+
+function playNudgeSnippetAt(startSec) {
+  if (!audioPlayer.src || audioDuration <= 0) return;
+  initAudioContext();
+  const clamped = Math.max(0, Math.min(audioDuration, startSec));
+  audioPlayer.currentTime = clamped;
+  if (audioNudgeStopTimer) clearTimeout(audioNudgeStopTimer);
+  if (audioPlayer.paused) {
+    audioPlayer.play().catch(() => {});
+    audioNudgeStopTimer = setTimeout(() => {
+      audioPlayer.pause();
+    }, 180);
+  }
+}
+
+function scheduleSaveAudioTrim() {
+  if (audioNudgeSaveTimer) clearTimeout(audioNudgeSaveTimer);
+  audioNudgeSaveTimer = setTimeout(() => {
+    saveAudioTrimToBackend();
+  }, 240);
+}
+
+function nudgeAudioPoint(direction, isLarge = false) {
+  if (audioDuration <= 0 || currentIndex < 0) return;
+  const step = isLarge ? 0.25 : 0.05;
+  const delta = direction * step;
+  const isTrimOpen = audioTrimControls && !audioTrimControls.classList.contains("hidden");
+
+  if (isTrimOpen && activeAudioPoint === "in") {
+    pushAudioUndo();
+    audioIn = Math.max(0, Math.min(audioOut - 0.05, audioIn + delta));
+    updateAudioTrimUI();
+    playNudgeSnippetAt(audioIn);
+    scheduleSaveAudioTrim();
+    return;
+  }
+  if (isTrimOpen && activeAudioPoint === "out") {
+    pushAudioUndo();
+    audioOut = Math.min(audioDuration, Math.max(audioIn + 0.05, audioOut + delta));
+    updateAudioTrimUI();
+    playNudgeSnippetAt(Math.max(audioIn, audioOut - 0.14));
+    scheduleSaveAudioTrim();
+    return;
+  }
+
+  // Default: nudge playhead frame-by-frame
+  setActiveAudioPoint("playhead");
+  const baseTime = Number.isFinite(audioPlayer.currentTime) ? audioPlayer.currentTime : audioIn;
+  const nextTime = Math.max(0, Math.min(audioDuration, baseTime + delta));
+  playNudgeSnippetAt(nextTime);
+  if (timeCurrent) timeCurrent.textContent = formatTime(nextTime);
+  if (timeSeek && audioDuration > 0) timeSeek.value = (nextTime / audioDuration) * 100;
+}
+
 // Mouse / Pointer Dragging on Waveform & Handles
 audioInHandle.addEventListener("pointerdown", (e) => {
   e.stopPropagation();
   pushAudioUndo();
   isDraggingAudioHandle = "in";
+  setActiveAudioPoint("in");
   audioInHandle.classList.add("dragging");
 });
 
@@ -614,12 +702,14 @@ audioOutHandle.addEventListener("pointerdown", (e) => {
   e.stopPropagation();
   pushAudioUndo();
   isDraggingAudioHandle = "out";
+  setActiveAudioPoint("out");
   audioOutHandle.classList.add("dragging");
 });
 
 audioWaveformCanvas.addEventListener("pointerdown", (e) => {
   if (audioDuration <= 0) return;
   isDraggingAudioHandle = "scrub";
+  setActiveAudioPoint("playhead");
   scrubAudioByEvent(e);
 });
 
@@ -663,6 +753,7 @@ btnToggleAudioTrim.addEventListener("click", () => {
   audioInHandle.classList.toggle("hidden", isHidden);
   audioOutHandle.classList.toggle("hidden", isHidden);
   btnToggleAudioTrim.textContent = isHidden ? "✂️ 소리 파형 편집 ▸" : "✂️ 소리 파형 접기 ▾";
+  if (isHidden) setActiveAudioPoint("playhead");
 });
 
 // Audio Trim Buttons
@@ -670,6 +761,7 @@ document.getElementById("btnAudioSetIn").addEventListener("click", () => {
   if (audioDuration <= 0) return;
   pushAudioUndo();
   audioIn = Math.min(audioPlayer.currentTime, Math.max(0, audioOut - 0.05));
+  setActiveAudioPoint("in");
   updateAudioTrimUI();
   saveAudioTrimToBackend();
 });
@@ -678,6 +770,7 @@ document.getElementById("btnAudioSetOut").addEventListener("click", () => {
   if (audioDuration <= 0) return;
   pushAudioUndo();
   audioOut = Math.max(audioPlayer.currentTime, Math.min(audioDuration, audioIn + 0.05));
+  setActiveAudioPoint("out");
   updateAudioTrimUI();
   saveAudioTrimToBackend();
 });
@@ -1516,6 +1609,11 @@ async function selectSlot(slotId, autoPlay = true) {
   currentSlot = slot;
   similarAnchorSoundId = null;
   renderSimilarStatusBanner();
+  fetch("/api/system/active_slot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slot_id: slotId }),
+  }).catch(() => {});
 
   currentSlotName.textContent = slot.name;
   currentSlotCategory.textContent = slot.category.toUpperCase();
@@ -1537,6 +1635,7 @@ async function selectSlot(slotId, autoPlay = true) {
     syncActiveSlotCompareDockFromCandidates();
     renderCandidatesQueue();
     renderSlotsList();
+    loadTrashForCurrentSlot();
 
     if (currentCandidates.length > 0) {
       const confirmedIdx = currentCandidates.findIndex(c => c.candidate_status === "confirmed");
@@ -1585,10 +1684,12 @@ function playCandidate(index, autoPlay = true) {
     soundBadgeSource.textContent = `🎲 AI 변형 · ${cand.license_type}`;
     soundBadgeSource.className = "bg-indigo-950/80 text-indigo-300 font-semibold px-3 py-1 rounded-full border border-indigo-700/70 truncate";
   } else {
-    currentSoundMeta.textContent = `${cand.duration.toFixed(1)}s · ${cand.license_type} · ${cand.author || "LotsOfSounds"}`;
-    soundBadgeSource.textContent = `LotsOfSounds · ${cand.license_type}`;
+    const srcLabel = cand.source === "freesound" ? "Freesound" : "LotsOfSounds";
+    currentSoundMeta.textContent = `${cand.duration.toFixed(1)}s · ${cand.license_type} · ${cand.author || srcLabel}`;
+    soundBadgeSource.textContent = `${srcLabel} · ${cand.license_type}`;
     soundBadgeSource.className = "bg-[#242424] text-emerald-400 font-semibold px-3 py-1 rounded-full border border-emerald-900/50 truncate";
   }
+  setActiveAudioPoint("playhead");
   soundMatchScore.textContent = `${Math.round(cand.score * 100)}% Match`;
   queuePosition.textContent = `후보 ${index + 1} / ${currentCandidates.length}`;
 
@@ -1700,7 +1801,7 @@ function renderSlotsList() {
     if (slotFilterMode === "confirmed" && s.status !== "confirmed") return false;
     if (slotFilterMode === "liked" && !(s.liked_count > 0)) return false;
     if (currentCategory !== "all" && s.category !== currentCategory) return false;
-    const searchVal = document.getElementById("searchInput").value.toLowerCase();
+    const searchVal = topSearchMode === "slot" ? document.getElementById("searchInput").value.toLowerCase() : "";
     if (searchVal && !s.name.toLowerCase().includes(searchVal) && !s.memo.toLowerCase().includes(searchVal)) return false;
     return true;
   });
@@ -2141,6 +2242,7 @@ async function skipCandidateById(soundId) {
 
     renderCandidatesQueue();
     renderSlotsList();
+    loadTrashForCurrentSlot();
 
     if (currentCandidates.length === 0) {
       clearEmptySlotPlayerUI();
@@ -2189,6 +2291,7 @@ async function pruneUnlikedCandidates() {
       activeSlotBadge.textContent = `${currentSlot.name} (${currentCandidates.length} 후보)`;
       renderCandidatesQueue();
       renderSlotsList();
+      loadTrashForCurrentSlot();
 
       if (currentCandidates.length === 0) {
         clearEmptySlotPlayerUI();
@@ -2198,15 +2301,120 @@ async function pruneUnlikedCandidates() {
       }
 
       const banner = document.getElementById("similarStatusBanner");
-      if (banner) {
-        banner.textContent = `🧹 미찜 후보 ${data.removed_count || removableCount}개 정리 완료 (남은 후보 ${currentCandidates.length}개)`;
-        banner.classList.remove("hidden");
-      }
+    if (banner) {
+      banner.textContent = `🧹 미찜 후보 ${data.removed_count || removableCount}개 정리 완료 (삭제함으로 이동 · 남은 후보 ${currentCandidates.length}개)`;
+      banner.classList.remove("hidden");
+    }
     }
   } catch (e) {
     console.error("Prune unliked error:", e);
   } finally {
     loadingSpinner.classList.add("hidden");
+  }
+}
+
+async function loadTrashForCurrentSlot() {
+  const btnTrash = document.getElementById("tabTrashBtn");
+  if (!currentSlot) {
+    currentTrash = [];
+    if (btnTrash) btnTrash.textContent = "🗑️ 삭제함 (0)";
+    renderTrashList();
+    return;
+  }
+  try {
+    const res = await fetch(`/api/slots/${currentSlot.id}/trash`);
+    if (!res.ok) return;
+    const data = await res.json();
+    currentTrash = data.trash || [];
+    if (btnTrash) btnTrash.textContent = `🗑️ 삭제함 (${currentTrash.length})`;
+    renderTrashList();
+  } catch (e) {
+    console.warn("Failed to load trash:", e);
+  }
+}
+
+function renderTrashList() {
+  const container = document.getElementById("trashListContainer");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!currentTrash.length) {
+    container.innerHTML = `<div class="text-center text-gray-500 text-xs py-8">삭제한 후보가 없습니다.</div>`;
+    return;
+  }
+  currentTrash.forEach((t) => {
+    const row = document.createElement("div");
+    row.className = "p-2.5 rounded-lg bg-[#181818] border border-[#2a2a2a] flex items-center justify-between gap-2 text-xs";
+    row.innerHTML = `
+      <div class="min-w-0 flex-1">
+        <div class="font-bold text-gray-200 truncate">${t.name}</div>
+        <div class="text-[11px] text-gray-400 font-mono truncate">${Number(t.duration || 0).toFixed(1)}s · ${t.license_type || "CC0"}</div>
+      </div>
+    `;
+    const actions = document.createElement("div");
+    actions.className = "flex items-center gap-1 shrink-0";
+
+    const previewBtn = document.createElement("button");
+    previewBtn.className = "px-2 py-1 rounded bg-[#242424] hover:bg-[#333] text-gray-200 text-[11px]";
+    previewBtn.textContent = "듣기";
+    previewBtn.addEventListener("click", () => {
+      initAudioContext();
+      audioPlayer.pause();
+      audioPlayer.src = t.audio_url;
+      audioPlayer.play().catch(() => {});
+    });
+
+    const restoreBtn = document.createElement("button");
+    restoreBtn.className = "px-2 py-1 rounded bg-emerald-950 hover:bg-[#1DB954] hover:text-black text-emerald-300 border border-emerald-700 text-[11px] font-bold";
+    restoreBtn.textContent = "↩ 복구";
+    restoreBtn.addEventListener("click", () => restoreCandidateById(t.sound_id));
+
+    actions.appendChild(previewBtn);
+    actions.appendChild(restoreBtn);
+    row.appendChild(actions);
+    container.appendChild(row);
+  });
+}
+
+async function restoreCandidateById(soundId) {
+  if (!currentSlot || !soundId) return;
+  try {
+    const res = await fetch("/api/actions/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slot_id: currentSlot.id, sound_id: soundId }),
+    });
+    if (!res.ok) return;
+    const qParam = maxSearchDuration > 0 ? `?max_dur=${encodeURIComponent(maxSearchDuration)}` : "";
+    const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates${qParam}`);
+    const cData = await cRes.json();
+    currentCandidates = cData.candidates || [];
+    await loadSlots();
+    await loadTrashForCurrentSlot();
+    renderCandidatesQueue();
+    renderSlotsList();
+    const restoredIdx = currentCandidates.findIndex(c => c.sound_id === soundId);
+    if (restoredIdx >= 0) playCandidate(restoredIdx, true);
+  } catch (e) {
+    console.error("Restore candidate error:", e);
+  }
+}
+
+async function restoreAllTrash() {
+  if (!currentSlot || !currentTrash.length) return;
+  try {
+    const res = await fetch(`/api/slots/${currentSlot.id}/trash/restore_all`, { method: "POST" });
+    if (!res.ok) return;
+    const qParam = maxSearchDuration > 0 ? `?max_dur=${encodeURIComponent(maxSearchDuration)}` : "";
+    const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates${qParam}`);
+    const cData = await cRes.json();
+    currentCandidates = cData.candidates || [];
+    await loadSlots();
+    await loadTrashForCurrentSlot();
+    renderCandidatesQueue();
+    renderSlotsList();
+    if (currentCandidates.length > 0 && currentIndex < 0) playCandidate(0, false);
+  } catch (e) {
+    console.error("Restore all trash error:", e);
   }
 }
 
@@ -2310,8 +2518,11 @@ async function confirmCurrent() {
     renderSlotsList();
     updateProgress();
 
-    const nextSlot = allSlots.find(s => s.status !== "confirmed" && s.status !== "on_hold");
-    if (nextSlot) selectSlot(nextSlot.id);
+    // Stay in the SAME slot and advance cleanly to the NEXT sound in queue
+    if (currentCandidates.length > 1) {
+      const nextIdx = (currentIndex + 1) % currentCandidates.length;
+      playCandidate(nextIdx, true);
+    }
   } catch (e) {
     console.error("Confirm error:", e);
   }
@@ -2594,19 +2805,38 @@ document.querySelectorAll(".cat-btn").forEach(btn => {
   });
 });
 
-document.getElementById("tabSlotsBtn").addEventListener("click", () => {
-  document.getElementById("tabSlots").classList.remove("hidden");
-  document.getElementById("tabCandidates").classList.add("hidden");
-  document.getElementById("tabSlotsBtn").classList.add("border-[#1DB954]", "text-white");
-  document.getElementById("tabCandidatesBtn").classList.remove("border-[#1DB954]", "text-white");
-});
+function switchRightPanelTab(tabName) {
+  const tabSlots = document.getElementById("tabSlots");
+  const tabCandidates = document.getElementById("tabCandidates");
+  const tabTrash = document.getElementById("tabTrash");
+  const btnSlots = document.getElementById("tabSlotsBtn");
+  const btnCandidates = document.getElementById("tabCandidatesBtn");
+  const btnTrash = document.getElementById("tabTrashBtn");
 
-document.getElementById("tabCandidatesBtn").addEventListener("click", () => {
-  document.getElementById("tabCandidates").classList.remove("hidden");
-  document.getElementById("tabSlots").classList.add("hidden");
-  document.getElementById("tabCandidatesBtn").classList.add("border-[#1DB954]", "text-white");
-  document.getElementById("tabSlotsBtn").classList.remove("border-[#1DB954]", "text-white");
-});
+  [tabSlots, tabCandidates, tabTrash].forEach(el => el && el.classList.add("hidden"));
+  [btnSlots, btnCandidates, btnTrash].forEach(btn => btn && btn.classList.remove("border-[#1DB954]", "text-white"));
+
+  if (tabName === "candidates") {
+    if (tabCandidates) tabCandidates.classList.remove("hidden");
+    if (btnCandidates) btnCandidates.classList.add("border-[#1DB954]", "text-white");
+  } else if (tabName === "trash") {
+    if (tabTrash) tabTrash.classList.remove("hidden");
+    if (btnTrash) btnTrash.classList.add("border-[#1DB954]", "text-white");
+    loadTrashForCurrentSlot();
+  } else {
+    if (tabSlots) tabSlots.classList.remove("hidden");
+    if (btnSlots) btnSlots.classList.add("border-[#1DB954]", "text-white");
+  }
+}
+
+document.getElementById("tabSlotsBtn").addEventListener("click", () => switchRightPanelTab("slots"));
+document.getElementById("tabCandidatesBtn").addEventListener("click", () => switchRightPanelTab("candidates"));
+if (document.getElementById("tabTrashBtn")) {
+  document.getElementById("tabTrashBtn").addEventListener("click", () => switchRightPanelTab("trash"));
+}
+if (document.getElementById("btnRestoreAllTrash")) {
+  document.getElementById("btnRestoreAllTrash").addEventListener("click", restoreAllTrash);
+}
 
 document.getElementById("toggleLeftBtn").addEventListener("click", () => {
   const isHidden = document.getElementById("leftPanel").classList.toggle("hidden");
@@ -2780,25 +3010,40 @@ maxDurationInput.addEventListener("change", async () => {
   }
 });
 
-btnRescoutSlot.addEventListener("click", async () => {
+async function runSlotScoutOrBulk(includeFreesound = false, targetCount = 24) {
   if (!currentSlot) return;
   const val = parseFloat(maxDurationInput.value);
   maxSearchDuration = !Number.isNaN(val) && val > 0 ? val : 0;
   saveSetting("max_search_dur", maxSearchDuration > 0 ? String(maxSearchDuration) : "");
 
+  const btnBulk = document.getElementById("btnBulkPrefetchSlot");
   btnRescoutSlot.disabled = true;
-  btnRescoutSlot.textContent = "⏳ 검색 중...";
+  if (btnBulk) btnBulk.disabled = true;
+  btnRescoutSlot.textContent = "⏳ 중...";
+  if (btnBulk && includeFreesound) btnBulk.textContent = "⏳ 확보 중...";
   loadingSpinner.classList.remove("hidden");
 
   try {
     const res = await fetch(`/api/slots/${currentSlot.id}/rescout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ max_dur: maxSearchDuration > 0 ? maxSearchDuration : null }),
+      body: JSON.stringify({
+        max_dur: maxSearchDuration > 0 ? maxSearchDuration : null,
+        include_freesound: includeFreesound,
+        target_count: targetCount,
+      }),
     });
     const data = await res.json();
     await loadSlots();
     await selectSlot(currentSlot.id, false);
+    if (includeFreesound) switchRightPanelTab("candidates");
+    const banner = document.getElementById("similarStatusBanner");
+    if (banner && res.ok) {
+      banner.textContent = includeFreesound
+        ? `📦 대량 확보 완료: +${data.found_count || 0}개 추가 반영 (총 ${currentCandidates.length}개 후보)`
+        : `🔍 재탐색 완료: +${data.found_count || 0}개 반영 (총 ${currentCandidates.length}개 후보)`;
+      banner.classList.remove("hidden");
+    }
     if (res.ok && data.found_count === 0) {
       alert(`${maxSearchDuration > 0 ? maxSearchDuration + "초 이하의 " : ""}새 후보를 찾지 못했습니다. 최대 길이를 조금 늘려서 다시 찾아보세요.`);
     }
@@ -2807,9 +3052,19 @@ btnRescoutSlot.addEventListener("click", async () => {
   } finally {
     loadingSpinner.classList.add("hidden");
     btnRescoutSlot.disabled = false;
-    btnRescoutSlot.textContent = "🔍 새로 찾기";
+    btnRescoutSlot.textContent = "🔍 찾기";
+    if (btnBulk) {
+      btnBulk.disabled = false;
+      btnBulk.textContent = "📦 대량";
+    }
   }
-});
+}
+
+btnRescoutSlot.addEventListener("click", () => runSlotScoutOrBulk(false, 24));
+const btnBulkPrefetchEl = document.getElementById("btnBulkPrefetchSlot");
+if (btnBulkPrefetchEl) {
+  btnBulkPrefetchEl.addEventListener("click", () => runSlotScoutOrBulk(true, 40));
+}
 
 const btnCheckUpdate = document.getElementById("btnCheckUpdate");
 const updateDot = document.getElementById("updateDot");
@@ -2854,7 +3109,221 @@ async function checkForUpdate(silent = true) {
 
 btnCheckUpdate.addEventListener("click", () => checkForUpdate(false));
 
-document.getElementById("searchInput").addEventListener("input", renderSlotsList);
+const topSearchInput = document.getElementById("searchInput");
+const btnSearchModeToggle = document.getElementById("btnSearchModeToggle");
+const btnRunTopSearch = document.getElementById("btnRunTopSearch");
+const btnOpenFreesoundPopup = document.getElementById("btnOpenFreesoundPopup");
+const btnImportFromPopup = document.getElementById("btnImportFromPopup");
+
+function updateTopSearchModeUI() {
+  if (btnSearchModeToggle) {
+    if (topSearchMode === "sound") {
+      btnSearchModeToggle.textContent = "🔊 사운드/URL";
+      btnSearchModeToggle.className = "px-3 py-1.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-700 text-xs font-bold shrink-0 hover:bg-emerald-900 transition";
+    } else {
+      btnSearchModeToggle.textContent = "📋 슬롯 필터";
+      btnSearchModeToggle.className = "px-3 py-1.5 rounded-full bg-[#242424] text-gray-200 border border-[#444] text-xs font-bold shrink-0 hover:bg-[#333] transition";
+    }
+  }
+  if (topSearchInput) {
+    topSearchInput.placeholder = topSearchMode === "sound"
+      ? "사운드 검색 (예: 엘리베이터 닫힘, bell) 또는 Freesound/LotsOfSounds URL 붙여넣기..."
+      : "슬롯 필터 (예: 철문, 엘리베이터, 발소리...) · URL 붙여넣기도 가능";
+  }
+  if (btnRunTopSearch) {
+    btnRunTopSearch.classList.toggle("hidden", topSearchMode === "slot" && !/^https?:\/\//i.test((topSearchInput?.value || "").trim()));
+  }
+}
+
+async function importUrlIntoCurrentSlot(rawUrl) {
+  if (!currentSlot) {
+    alert("먼저 왼쪽/오른쪽에서 대상 사운드 슬롯을 선택해주세요.");
+    return;
+  }
+  const cleanUrl = (rawUrl || "").trim();
+  if (!cleanUrl) return;
+  loadingSpinner.classList.remove("hidden");
+  if (btnRunTopSearch) {
+    btnRunTopSearch.disabled = true;
+    btnRunTopSearch.textContent = "⏳...";
+  }
+  try {
+    const res = await fetch(`/api/slots/${currentSlot.id}/import_url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: cleanUrl }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(`URL 가져오기 실패: ${data.detail || "지원되지 않는 주소입니다."}`);
+      return;
+    }
+    if (topSearchInput) topSearchInput.value = "";
+    await refreshSlotAfterCandidateMutation(data.first_sound_id, `🔗 URL에서 ${data.imported_count}개 사운드를 후보 맨 위에 추가했습니다.`);
+  } catch (e) {
+    alert(`URL 가져오기 오류: ${e}`);
+  } finally {
+    loadingSpinner.classList.add("hidden");
+    if (btnRunTopSearch) {
+      btnRunTopSearch.disabled = false;
+      btnRunTopSearch.textContent = "검색/추가";
+    }
+  }
+}
+
+async function refreshSlotAfterCandidateMutation(targetSoundId = null, bannerText = "") {
+  if (!currentSlot) return;
+  const qParam = maxSearchDuration > 0 ? `?max_dur=${encodeURIComponent(maxSearchDuration)}` : "";
+  const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates${qParam}`);
+  const cData = await cRes.json();
+  currentCandidates = cData.candidates || [];
+  await loadSlots();
+  await loadTrashForCurrentSlot();
+  renderCandidatesQueue();
+  renderSlotsList();
+  switchRightPanelTab("candidates");
+
+  if (currentCandidates.length > 0) {
+    const idx = targetSoundId ? currentCandidates.findIndex(c => c.sound_id === targetSoundId) : 0;
+    playCandidate(idx >= 0 ? idx : 0, true);
+  }
+  const banner = document.getElementById("similarStatusBanner");
+  if (banner && bannerText) {
+    banner.textContent = bannerText;
+    banner.classList.remove("hidden");
+  }
+}
+
+async function executeTopSearchOrUrl() {
+  const val = (topSearchInput ? topSearchInput.value : "").trim();
+  if (!val) {
+    if (topSearchMode === "slot") renderSlotsList();
+    return;
+  }
+  if (/^https?:\/\//i.test(val)) {
+    await importUrlIntoCurrentSlot(val);
+    return;
+  }
+  if (topSearchMode === "slot") {
+    switchRightPanelTab("slots");
+    renderSlotsList();
+    return;
+  }
+  if (!currentSlot) return;
+
+  loadingSpinner.classList.remove("hidden");
+  if (btnRunTopSearch) {
+    btnRunTopSearch.disabled = true;
+    btnRunTopSearch.textContent = "⏳...";
+  }
+  try {
+    const res = await fetch(`/api/slots/${currentSlot.id}/manual_search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: val,
+        max_dur: maxSearchDuration > 0 ? maxSearchDuration : null,
+        limit: 30,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(`사운드 검색 실패: ${data.detail || "오류"}`);
+      return;
+    }
+    if (data.added_count === 0) {
+      alert(`'${val}' 검색 결과가 없습니다. 다른 키워드(영문 포함)를 시도하거나 Freesound 창에서 직접 찾아보세요.`);
+      return;
+    }
+    await refreshSlotAfterCandidateMutation(
+      data.first_sound_id,
+      `🔊 '${val}' 수동 검색 완료: ${data.added_count}개 사운드를 대기열에 추가했습니다 (총 ${currentCandidates.length}개)`
+    );
+  } catch (e) {
+    alert(`사운드 검색 오류: ${e}`);
+  } finally {
+    loadingSpinner.classList.add("hidden");
+    if (btnRunTopSearch) {
+      btnRunTopSearch.disabled = false;
+      btnRunTopSearch.textContent = "검색/추가";
+    }
+  }
+}
+
+if (btnSearchModeToggle) {
+  btnSearchModeToggle.addEventListener("click", () => {
+    topSearchMode = topSearchMode === "sound" ? "slot" : "sound";
+    updateTopSearchModeUI();
+    renderSlotsList();
+    if (topSearchInput) topSearchInput.focus();
+  });
+}
+
+if (topSearchInput) {
+  topSearchInput.addEventListener("input", () => {
+    if (topSearchMode === "slot") {
+      renderSlotsList();
+    }
+    updateTopSearchModeUI();
+  });
+  topSearchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      executeTopSearchOrUrl();
+    }
+  });
+}
+
+if (btnRunTopSearch) {
+  btnRunTopSearch.addEventListener("click", executeTopSearchOrUrl);
+}
+
+if (btnOpenFreesoundPopup) {
+  btnOpenFreesoundPopup.addEventListener("click", () => {
+    const typed = (topSearchInput ? topSearchInput.value : "").trim();
+    const rawTags = currentSlot && Array.isArray(currentSlot.search_tags) ? currentSlot.search_tags.slice(0, 2).join(" ") : "";
+    const q = (!/^https?:\/\//i.test(typed) && typed) ? typed : (rawTags || (currentSlot ? currentSlot.name : "game sfx"));
+    const targetUrl = `https://freesound.org/search/?q=${encodeURIComponent(q)}&f=license%3A%22Creative+Commons+0%22`;
+    openOriginalSource(targetUrl, { name: `Freesound 탐색 (${q})`, source_kind: "external" });
+  });
+}
+
+if (btnImportFromPopup) {
+  btnImportFromPopup.addEventListener("click", async () => {
+    if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.get_popup_url === "function") {
+      const info = await window.pywebview.api.get_popup_url();
+      if (info && info.url && /^https?:\/\//i.test(info.url)) {
+        await importUrlIntoCurrentSlot(info.url);
+        return;
+      }
+    }
+    const manual = prompt("열려 있는 창이 없거나 주소를 읽지 못했습니다. Freesound/LotsOfSounds URL을 직접 붙여넣으세요:");
+    if (manual && manual.trim()) await importUrlIntoCurrentSlot(manual.trim());
+  });
+}
+
+async function pollDesktopPopupBridge() {
+  try {
+    const res = await fetch("/api/desktop/popup_state");
+    if (!res.ok) return;
+    const st = await res.json();
+    if (st.import_seq && st.import_seq > lastPopupImportSeq) {
+      lastPopupImportSeq = st.import_seq;
+      const imp = st.last_imported;
+      if (imp && currentSlot && imp.slot_id === currentSlot.id) {
+        await refreshSlotAfterCandidateMutation(
+          imp.first_sound_id,
+          `📥 팝업 창에서 ${imp.imported_count}개 사운드를 바로 후보에 담았습니다!`
+        );
+      } else {
+        await loadSlots();
+      }
+    }
+  } catch (_) {}
+}
+
+updateTopSearchModeUI();
+setInterval(pollDesktopPopupBridge, 2000);
 
 document.querySelectorAll(".dock-btn").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -3580,6 +4049,12 @@ window.addEventListener("keydown", (e) => {
     if (currentIndex >= 0 && currentCandidates[currentIndex]) {
       skipCandidateById(currentCandidates[currentIndex].sound_id);
     }
+  } else if (e.code === "KeyA") {
+    e.preventDefault();
+    nudgeAudioPoint(-1, e.shiftKey);
+  } else if (e.code === "KeyD") {
+    e.preventDefault();
+    nudgeAudioPoint(1, e.shiftKey);
   } else if (code === k.sourceLink) {
     e.preventDefault();
     const cand = currentIndex >= 0 ? currentCandidates[currentIndex] : null;

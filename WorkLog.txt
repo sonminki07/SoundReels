@@ -304,3 +304,29 @@
   - `verify_v21.py` 통과: 다회차 유사 탐색 키워드 순환 및 한국어 프롬프트(`더 짧고 맑은 금속 딩 소리`) 반영(`+6`개씩 누적), 개별 스킵(`20 -> 19`), 미찜 일괄 정리(`18`개 삭제 후 찜 1개 보존), `check_update` 확인 및 DB 원복 완료
   - `test_v12.py` 회귀 테스트 전체 통과
 ================================================================================
+
+17. v2.2 A/D 프레임 미세 이동, 채택 후 다음 소리 유지, 삭제함 복구, 사운드 직접/대량 검색 & Freesound URL/창 연동
+--------------------------------------------------------------------------------
+- 배경 및 요구사항:
+  1) 파형에서 `A` / `D` 키로 선택 지점을 짧은 프레임 단위(`0.05s`, `Shift+A/D`: `0.25s`)로 미세 이동 요청
+  2) `최종 채택` 시 첫 번째 미확정 슬롯으로 점프하던 문제 수정 → 현재 슬롯에 머무른 채 다음 후보 소리로 이동 요청
+  3) 삭제(`skipped`)한 후보를 모아 삭제 취소(복구)하고, 모든 재탐색/수동 검색 시 삭제한 후보는 다시 뜨지 않도록 분리 요청
+  4) AI 추천 외에도 수동 사운드 검색(`🔊 사운드/URL` 상단 전환), 대량 후보 사전 다운로드(`📦 대량`), Freesound/LotsOfSounds URL 직접 추가 및 앱 내 팝업 창 연동 요청
+- 구현 내역:
+  1) `A` / `D` 파형 지점 미세 이동 (`index.html`, `app.js`):
+     - `setActiveAudioPoint`, `nudgeAudioPoint`, `playNudgeSnippetAt`, `scheduleSaveAudioTrim` 추가 (`#audioNudgePointBadge` 표시)
+     - 파형 편집 열림 + `시작점`/`끝점` 핸들 선택 상태에서는 해당 경계를 `±0.05s`(`Shift`: `±0.25s`) 이동 및 디바운스 자동 저장, 평상시에는 재생 커서를 이동하며 `0.18s` 미리듣기 재생
+  2) 최종 채택 후 다음 소리로 이동 (`app.js` `confirmCurrent`):
+     - 기존 `allSlots.find(...); selectSlot(nextSlot.id)` 제거 → 같은 슬롯을 유지한 채 다음 후보(`(currentIndex + 1) % currentCandidates.length`)를 즉시 재생
+  3) 삭제함(복구) & 재탐색 제외 (`sound_scout.py`, `main.py`, `index.html`, `app.js`):
+     - `scout_slot`, `manual_search_into_slot`, `find_similar_to_sound` 전 구간에서 `status='skipped'` ID 제외
+     - `GET /api/slots/{slot_id}/trash`, `POST /api/actions/restore`, `POST /api/slots/{slot_id}/trash/restore_all` 및 우측 `🗑️ 삭제함` 탭/복구 버튼 추가
+  4) 수동 사운드 검색 · Freesound CC0 대량 확보 · URL 직접 추가 & 팝업 창 브리지 (`sound_scout.py`, `main.py`, `run_desktop.py`, `index.html`, `app.js`):
+     - `search_freesound`, `_parse_freesound_players`, `download_direct_audio`, `fetch_sounds_from_url`, `manual_search_into_slot`, `import_url_into_slot` 구현(API 키 불필요, 10스레드 병렬 다운로드 및 CLAP 백그라운드 워밍업 적용)
+     - 상단 `[🔊 사운드/URL | 📋 슬롯 필터]` 전환 + `🌐 Freesound` 팝업 창 + `📥 창 담기` + 팝업 내부 플로팅 `📥 현재 소리 SoundReels 후보에 추가` 브리지 버튼 및 `/api/desktop/popup_import` 연동
+     - `📦 대량` (`include_freesound=True, target_count=40`) 버튼 추가
+- 검증 결과 (QA 통과):
+  - `node --check backend/app/static/app.js` 및 Python `py_compile` 오류 0건
+  - `verify_v22.py` 통과: `index.html`/`app.js` `v2.2` 토큰, `confirmCurrent` 타슬롯 점프 제거 확인, 삭제→삭제함→수동검색 재노출 방지→복구(`fs-556699`), `freesound.org/s/868295/` URL 1순위 추가 및 악성 도메인 `400` 차단, 팝업 브리지 & 대량 확보, `check_update` 및 DB 원복 완료
+  - `test_v12.py` 회귀 테스트 전체 통과
+================================================================================

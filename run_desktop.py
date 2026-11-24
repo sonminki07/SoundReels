@@ -114,20 +114,97 @@ def _is_allowed_source_url(url: str) -> bool:
 class DesktopApi:
     """Native PyWebView JS-to-Python bridge for guaranteed window & browser launching."""
 
+    def __init__(self):
+        self._popup_window = None
+
+    def get_popup_url(self):
+        win = self._popup_window
+        if not win:
+            return {"status": "empty", "url": ""}
+        try:
+            url = win.get_current_url() or ""
+            return {"status": "ok", "url": url}
+        except Exception:
+            self._popup_window = None
+            return {"status": "closed", "url": ""}
+
+    def import_from_popup(self, url: str = ""):
+        target_url = (url or "").strip()
+        if not target_url and self._popup_window:
+            try:
+                target_url = self._popup_window.get_current_url() or ""
+            except Exception:
+                target_url = ""
+        if not _is_allowed_source_url(target_url):
+            return {"status": "error", "detail": "현재 페이지 URL은 가져오기 지원 대상이 아닙니다."}
+        try:
+            import json as _json
+            body = _json.dumps({"url": target_url}).encode("utf-8")
+            req = urllib.request.Request(
+                "http://127.0.0.1:8000/api/desktop/popup_import",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+                return data
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
+
     def open_source_window(self, url: str, title: str = "원본 출처"):
         if not _is_allowed_source_url(url):
             return {"status": "error", "detail": "Blocked URL"}
 
+        def _inject_bridge(win):
+            js_code = """
+            (function() {
+              if (document.getElementById('sr-popup-bridge-bar')) return;
+              var bar = document.createElement('div');
+              bar.id = 'sr-popup-bridge-bar';
+              bar.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:2147483647;display:flex;gap:8px;align-items:center;background:#121212;border:2px solid #1DB954;border-radius:999px;padding:8px 14px;box-shadow:0 8px 28px rgba(0,0,0,0.6);font-family:sans-serif;';
+              var btn = document.createElement('button');
+              btn.textContent = '📥 현재 소리 SoundReels 후보에 추가';
+              btn.style.cssText = 'background:#1DB954;color:#000;border:none;border-radius:999px;padding:6px 14px;font-weight:800;font-size:13px;cursor:pointer;';
+              btn.onclick = async function() {
+                btn.disabled = true;
+                btn.textContent = '⏳ 가져오는 중...';
+                try {
+                  var res = await window.pywebview.api.import_from_popup(window.location.href);
+                  if (res && res.status === 'ok') {
+                    btn.textContent = '✅ ' + (res.imported_count || 1) + '개 추가됨!';
+                    setTimeout(function() { btn.textContent = '📥 현재 소리 SoundReels 후보에 추가'; btn.disabled = false; }, 2200);
+                  } else {
+                    btn.textContent = '❌ ' + ((res && res.detail) || '가져오기 실패');
+                    setTimeout(function() { btn.textContent = '📥 현재 소리 SoundReels 후보에 추가'; btn.disabled = false; }, 2600);
+                  }
+                } catch (e) {
+                  btn.textContent = '❌ 오류';
+                  setTimeout(function() { btn.textContent = '📥 현재 소리 SoundReels 후보에 추가'; btn.disabled = false; }, 2200);
+                }
+              };
+              bar.appendChild(btn);
+              document.body.appendChild(bar);
+            })();
+            """
+            try:
+                win.evaluate_js(js_code)
+            except Exception:
+                pass
+
         def _spawn():
             try:
-                webview.create_window(
+                win = webview.create_window(
                     title=f"원본 출처: {title} — {url}",
                     url=url,
+                    js_api=self,
                     width=1120,
                     height=780,
                     focus=True,
                     text_select=True,
                 )
+                self._popup_window = win
+                win.events.loaded += lambda: _inject_bridge(win)
             except Exception as exc:
                 print(f"[SoundReels] Failed to open source popup window: {exc}", flush=True)
 
