@@ -1531,7 +1531,9 @@ async function selectSlot(slotId, autoPlay = true) {
 
     if (currentCandidates.length > 0) {
       const confirmedIdx = currentCandidates.findIndex(c => c.candidate_status === "confirmed");
-      playCandidate(confirmedIdx >= 0 ? confirmedIdx : 0, autoPlay);
+      const likedIdx = currentCandidates.findIndex(c => c.candidate_status === "liked");
+      const initialIdx = confirmedIdx >= 0 ? confirmedIdx : (likedIdx >= 0 ? likedIdx : 0);
+      playCandidate(initialIdx, autoPlay);
     } else {
       audioPlayer.pause();
       audioPlayer.removeAttribute("src");
@@ -1622,7 +1624,13 @@ function playCandidate(index, autoPlay = true) {
   }
   updateConfirmButtonUI(cand);
 
-  document.querySelectorAll(".dock-btn").forEach(b => b.classList.remove("active", "border-[#1DB954]"));
+  const dock = getActiveCompareDock();
+  document.querySelectorAll(".dock-btn").forEach((b, dIdx) => {
+    const docked = dock[dIdx];
+    const isThis = docked && docked.sound_id === cand.sound_id;
+    b.classList.toggle("active", !!isThis);
+    b.classList.toggle("border-[#1DB954]", !!isThis);
+  });
 
   // Decode bottom waveform & load trim boundaries
   decodeWaveformForCandidate(cand);
@@ -1757,6 +1765,9 @@ function renderCandidatesQueue() {
 
     const infoDiv = document.createElement("div");
     infoDiv.className = "truncate flex-1 pr-2 min-w-0 flex items-center gap-2.5";
+    const trimPill = ((c.audio_in && c.audio_in > 0) || (c.audio_out && c.audio_out > 0))
+      ? `<span class="ml-1.5 text-emerald-300 font-bold">✂️${Number(c.audio_in || 0).toFixed(2)}~${Number(c.audio_out || c.duration).toFixed(2)}s</span>`
+      : "";
     const speedPill = (c.playback_rate && Math.abs(c.playback_rate - 1.0) >= 0.01)
       ? `<span class="ml-1.5 text-amber-300 font-bold">⚡${Number(c.playback_rate).toFixed(2)}x</span>`
       : "";
@@ -1764,7 +1775,7 @@ function renderCandidatesQueue() {
       <span class="shrink-0 bg-[#242424] text-[#1DB954] font-mono font-bold text-xs px-2 py-1 rounded border border-[#333]">#${idx + 1}</span>
       <div class="truncate min-w-0">
         <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}${anchorTag}</div>
-        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${speedPill}</div>
+        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}</div>
       </div>
     `;
 
@@ -2572,7 +2583,13 @@ document.querySelectorAll(".dock-btn").forEach(btn => {
     const idx = parseInt(btn.dataset.dock, 10);
     const sound = getActiveCompareDock()[idx];
     if (sound) {
-      document.querySelectorAll(".dock-btn").forEach(b => b.classList.remove("active", "border-[#1DB954]"));
+      const dock = getActiveCompareDock();
+  document.querySelectorAll(".dock-btn").forEach((b, dIdx) => {
+    const docked = dock[dIdx];
+    const isThis = docked && docked.sound_id === cand.sound_id;
+    b.classList.toggle("active", !!isThis);
+    b.classList.toggle("border-[#1DB954]", !!isThis);
+  });
       btn.classList.add("active", "border-[#1DB954]");
 
       const cIdx = currentCandidates.findIndex(c => c.sound_id === sound.sound_id);
