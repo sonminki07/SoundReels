@@ -16,6 +16,16 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+# Under pythonw.exe (GUI mode), stdout/stderr are None, which crashes uvicorn's logging formatter.
+if sys.stdout is None or sys.stderr is None:
+    _log_dir = ROOT_DIR / "data"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_stream = open(_log_dir / "desktop_app.log", "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = _log_stream
+    if sys.stderr is None:
+        sys.stderr = _log_stream
+
 import uvicorn
 import webview
 
@@ -44,7 +54,7 @@ def main():
         server_thread = threading.Thread(target=start_backend, daemon=True)
         server_thread.start()
 
-        for _ in range(50):
+        for _ in range(150):
             if is_server_ready():
                 break
             time.sleep(0.1)
