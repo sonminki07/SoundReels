@@ -27,11 +27,18 @@ wheels/
 venv/
 ENV/
 
-# Data & Audio Files (Never commit raw audio / index / vectors to Git)
-data/
+# Runtime / Temp / Large Unused Cache (Active DB & active MP3s are tracked explicitly)
+data/webview_storage*/
+data/webview_storage.lock
+data/*.log
+data/p0_samples/
+data/db/*.db-wal
+data/db/*.db-shm
+data/audio_cache/*.mp3
+data/audio_cache/*.tmp
+data/audio_cache/*.wav
 cache/
 *.wav
-*.mp3
 *.ogg
 *.opus
 *.flac
@@ -40,9 +47,6 @@ cache/
 *.npy
 *.pt
 *.bin
-*.db
-*.sqlite
-*.sqlite3
 
 # Environment & Credentials
 .env

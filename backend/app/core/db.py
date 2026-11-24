@@ -12,6 +12,37 @@ DB_PATH = Path(os.getenv("SOUNDREELS_DB_PATH", BASE_DIR / "data" / "db" / "sound
 AUDIO_CACHE_DIR = Path(os.getenv("SOUNDREELS_CACHE_DIR", BASE_DIR / "data" / "audio_cache"))
 SCENE_CACHE_DIR = Path(os.getenv("SOUNDREELS_SCENE_DIR", BASE_DIR / "data" / "scene_cache"))
 
+
+def resolve_audio_path(sound_id: Optional[str], stored_path: Optional[str] = None) -> Path:
+    """Resolves cached audio path relative to current PC's AUDIO_CACHE_DIR (cross-PC portable)."""
+    if sound_id:
+        local_default = AUDIO_CACHE_DIR / f"{sound_id}.mp3"
+        if local_default.exists():
+            return local_default
+    if stored_path:
+        p = Path(stored_path)
+        if p.exists():
+            return p
+        rel_by_name = AUDIO_CACHE_DIR / p.name
+        if rel_by_name.exists():
+            return rel_by_name
+    if sound_id:
+        return AUDIO_CACHE_DIR / f"{sound_id}.mp3"
+    return Path(stored_path) if stored_path else AUDIO_CACHE_DIR
+
+
+def resolve_scene_path(stored_path: Optional[str]) -> Optional[Path]:
+    """Resolves attached scene media path relative to current PC's SCENE_CACHE_DIR."""
+    if not stored_path:
+        return None
+    p = Path(stored_path)
+    rel_local = SCENE_CACHE_DIR / p.name
+    if rel_local.exists():
+        return rel_local
+    if p.exists():
+        return p
+    return rel_local
+
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
@@ -147,7 +178,22 @@ def init_db():
         c.execute("CREATE INDEX IF NOT EXISTS idx_candidates_slot_rank ON slot_candidates(slot_id, rank);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_confirmed_slot ON confirmed_exports(slot_id);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_sounds_source ON sounds(source);")
-        
+
+        # Cross-PC Portability: normalize stale absolute paths from another drive/folder
+        c.execute("SELECT id, file_path FROM sounds")
+        for r in c.fetchall():
+            expected = AUDIO_CACHE_DIR / f"{r['id']}.mp3"
+            if str(r["file_path"] or "") != str(expected):
+                if expected.exists() or not Path(str(r["file_path"] or "")).exists():
+                    c.execute("UPDATE sounds SET file_path = ? WHERE id = ?", (str(expected), r["id"]))
+
+        c.execute("SELECT id, scene_media_path FROM slots WHERE scene_media_path IS NOT NULL AND scene_media_path != ''")
+        for r in c.fetchall():
+            fname = Path(str(r["scene_media_path"])).name
+            expected_scene = SCENE_CACHE_DIR / fname
+            if str(r["scene_media_path"]) != str(expected_scene) and expected_scene.exists():
+                c.execute("UPDATE slots SET scene_media_path = ? WHERE id = ?", (str(expected_scene), r["id"]))
+
         conn.commit()
 
 # 28 Game SFX Slot Definition Dictionary (Expanded into 30 granular slots)

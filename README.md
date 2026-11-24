@@ -21,6 +21,23 @@
 
 ---
 
+## 🛠️ 다른 PC에서 이어서 작업하기 (원클릭 복원 가이드)
+
+이 저장소에는 현재 작업 중인 **슬롯 상태·찜/확정 내역·파형 자르기/배속 정보(`data/db/soundreels.db`)**와 **활성 후보 음원(`data/audio_cache/`)**이 함께 포함되어 있습니다.
+
+1. **사전 준비**: 새 Windows PC에 [Python 3.11](https://www.python.org/) (`Add Python to PATH` 체크)과 [Git](https://git-scm.com/) 설치
+2. **다운로드**:
+   ```bash
+   git clone https://github.com/sonminki07/SoundReels.git
+   cd SoundReels
+   ```
+   *(또는 GitHub 페이지 상단 `Code` → `Download ZIP` 후 압축 해제)*
+3. **실행**: 폴더 안의 **`SoundReels.bat`** 더블클릭
+   - 최초 실행 시 `.venv` 가상환경, PyTorch(CUDA/CPU 자동 선택), 의존성 패키지를 자동 설치한 뒤 **이전 PC와 동일한 작업 상태로 바로 실행**됩니다.
+4. **작업 상태 GitHub 백업**: 작업 후 다른 PC에서도 이어서 쓰려면 **`Sync_State_to_GitHub.bat`** 실행
+
+---
+
 ## 🛠️ 개발 로드맵
 
 - [ ] **P0: 품질 검증 프로토타입** (CLAP 오디오 검색 정확도 검증, GTX 1060 환경 벤치마크)

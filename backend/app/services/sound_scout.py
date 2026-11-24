@@ -29,7 +29,7 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from backend.app.core.db import get_db_context, AUDIO_CACHE_DIR
+from backend.app.core.db import get_db_context, AUDIO_CACHE_DIR, resolve_audio_path
 from backend.app.services.loudness import compute_norm_gain
 
 AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -270,9 +270,10 @@ class SoundScout:
         if meta_reason:
             return {"ok": False, "reason": meta_reason}
 
-        fp = snd.get("file_path")
-        if not fp or not Path(fp).exists():
+        fp_resolved = resolve_audio_path(snd.get("id") or snd.get("sound_id"), snd.get("file_path"))
+        if not fp_resolved.exists():
             return {"ok": False, "reason": "missing_file"}
+        fp = str(fp_resolved)
 
         dsp_reason = self._analyze_audio_artifact(fp, allow_tonal=allow_tonal)
         if dsp_reason:
@@ -873,13 +874,13 @@ class SoundScout:
                 continue
             if self._is_metadata_blocked(p, allow_voice=allow_voice):
                 continue
-            fp = p.get("file_path")
-            if not fp or not Path(fp).exists():
+            fp_resolved = resolve_audio_path(pid, p.get("file_path"))
+            if not fp_resolved.exists():
                 continue
             hay = f"{p.get('name', '')} {p.get('tags', '')}".lower()
             if any(tok in hay for tok in query_tokens):
                 seen_ids.add(pid)
-                ready_sounds.append({**p, "from_local_pool": True})
+                ready_sounds.append({**p, "file_path": str(fp_resolved), "from_local_pool": True})
 
         # 2. Online LotsOfSounds + Freesound CC0 (smart paging + metadata & duration hygiene)
         raw_los: List[Dict[str, Any]] = []
@@ -1171,8 +1172,9 @@ class SoundScout:
         # 1. Build Slot-Anchored Target Embedding (Prevents Acoustic Drift to Off-Topic Noise)
         slot_pos_emb = self._get_slot_embeddings(slot)["pos_emb"]
         ref_emb = None
-        if ref_snd.get("file_path") and Path(ref_snd["file_path"]).exists():
-            ref_emb = self.compute_audio_embedding(ref_snd["file_path"])
+        ref_fp = resolve_audio_path(reference_sound_id, ref_snd.get("file_path"))
+        if ref_fp.exists():
+            ref_emb = self.compute_audio_embedding(str(ref_fp))
         ref_tags = json.loads(ref_snd.get("tags") or "[]")
         if ref_emb is None:
             ref_emb = self.compute_text_embedding([ref_snd.get("name", "")] + ref_tags, fallback_text=slot.get("name") or "game sound effect")

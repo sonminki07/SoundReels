@@ -35,6 +35,8 @@ from backend.app.core.db import (
     DB_PATH,
     AUDIO_CACHE_DIR,
     SCENE_CACHE_DIR,
+    resolve_audio_path,
+    resolve_scene_path,
 )
 from backend.app.services.loudness import compute_norm_gain
 
@@ -245,9 +247,9 @@ def _enrich_slot_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     d["clap_prompts"] = json.loads(d.get("clap_prompts") or "[]")
     d["search_tags"] = json.loads(d.get("search_tags") or "[]")
     d["negative_prompts"] = json.loads(d.get("negative_prompts") or "[]")
-    media_path = d.get("scene_media_path")
-    if media_path and Path(media_path).exists():
-        mtime = int(Path(media_path).stat().st_mtime)
+    media_path = resolve_scene_path(d.get("scene_media_path"))
+    if media_path and media_path.exists():
+        mtime = int(media_path.stat().st_mtime)
         d["scene_media_url"] = f"/api/slots/{d['id']}/scene/media?v={mtime}"
     else:
         d["scene_media_url"] = None
@@ -425,9 +427,10 @@ def scout_slot_from_scene(slot_id: str, req: SceneScoutRequest):
     if not slot.get("scene_media_path"):
         raise HTTPException(status_code=400, detail="No scene video or GIF attached to this slot")
 
-    media_path = Path(slot["scene_media_path"]).resolve()
-    if not media_path.is_relative_to(SCENE_CACHE_DIR.resolve()) or not media_path.exists():
+    media_path = resolve_scene_path(slot.get("scene_media_path"))
+    if not media_path or not media_path.resolve().is_relative_to(SCENE_CACHE_DIR.resolve()) or not media_path.exists():
         raise HTTPException(status_code=404, detail="Attached scene media file not found")
+    media_path = media_path.resolve()
 
     s_in = req.scene_in if req.scene_in is not None else float(slot.get("scene_in") or 0.0)
     s_out = req.scene_out if req.scene_out is not None else float(slot.get("scene_out") or 0.0)
@@ -483,17 +486,40 @@ def get_sound_audio(sound_id: str):
         raise HTTPException(status_code=403, detail="Forbidden path")
 
     if not local_path.exists():
+        row_dict = None
         with get_db_context() as conn:
             c = conn.cursor()
-            c.execute("SELECT file_path FROM sounds WHERE id = ?", (sound_id,))
+            c.execute("SELECT id, name, source, source_id, source_url, file_path FROM sounds WHERE id = ?", (sound_id,))
             row = c.fetchone()
-            if row and Path(row["file_path"]).exists():
-                candidate_path = Path(row["file_path"]).resolve()
-                if not candidate_path.is_relative_to(AUDIO_CACHE_DIR.resolve()):
-                    raise HTTPException(status_code=403, detail="Forbidden path")
-                local_path = candidate_path
-            else:
-                raise HTTPException(status_code=404, detail="Audio file not found in cache")
+            if row:
+                row_dict = dict(row)
+                cand_path = resolve_audio_path(sound_id, row_dict.get("file_path")).resolve()
+                if cand_path.exists() and cand_path.is_relative_to(AUDIO_CACHE_DIR.resolve()):
+                    local_path = cand_path
+
+        # Auto-redownload external audio if restored from trash on a fresh PC
+        if not local_path.exists() and row_dict and not sound_id.endswith("_mutated"):
+            try:
+                scout = get_scout()
+                src = str(row_dict.get("source") or "")
+                src_url = str(row_dict.get("source_url") or "")
+                if src == "lotsofsounds" or "lotsofsounds.com" in src_url:
+                    scout.download_sound({
+                        "id": sound_id,
+                        "name": row_dict.get("name") or sound_id,
+                        "stream_endpoint": f"/api/v1/sounds/sample/{sound_id}/stream",
+                        "duration": 0.0,
+                        "tags": [],
+                    })
+                elif src_url.startswith("https://"):
+                    items = scout.fetch_sounds_from_url(src_url, max_items=1)
+                    if items and "_already_downloaded" not in items[0]:
+                        scout.download_direct_audio(items[0])
+            except Exception as dl_exc:
+                print(f"[Audio Auto-Heal] Failed for {sound_id}: {dl_exc}")
+
+        if not local_path.exists():
+            raise HTTPException(status_code=404, detail="Audio file not found in cache")
     return FileResponse(str(local_path), media_type="audio/mpeg", headers={"Accept-Ranges": "bytes"})
 
 # --- Scene Media Upload / Stream / Trim Endpoints ---
@@ -554,10 +580,11 @@ def get_slot_scene_media(slot_id: str):
         row = c.fetchone()
         if not row or not row["scene_media_path"]:
             raise HTTPException(status_code=404, detail="No scene media attached to this slot")
-        media_path = Path(row["scene_media_path"]).resolve()
+        media_path = resolve_scene_path(row["scene_media_path"])
 
-    if not media_path.is_relative_to(SCENE_CACHE_DIR.resolve()) or not media_path.exists():
+    if not media_path or not media_path.resolve().is_relative_to(SCENE_CACHE_DIR.resolve()) or not media_path.exists():
         raise HTTPException(status_code=404, detail="Scene media file not found")
+    media_path = media_path.resolve()
 
     ext = media_path.suffix.lower()
     _, mime_type = ALLOWED_SCENE_EXTS.get(ext, ("video", "application/octet-stream"))
@@ -571,8 +598,8 @@ def delete_slot_scene(slot_id: str):
         c.execute("SELECT scene_media_path FROM slots WHERE id = ?", (slot_id,))
         row = c.fetchone()
         if row and row["scene_media_path"]:
-            media_path = Path(row["scene_media_path"]).resolve()
-            if media_path.is_relative_to(SCENE_CACHE_DIR.resolve()) and media_path.exists():
+            media_path = resolve_scene_path(row["scene_media_path"])
+            if media_path and media_path.resolve().is_relative_to(SCENE_CACHE_DIR.resolve()) and media_path.exists():
                 media_path.unlink()
         c.execute("""
         UPDATE slots
