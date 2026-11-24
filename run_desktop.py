@@ -7,6 +7,10 @@ with persistent storage (volume, panel sizes, settings) and custom icon.
 import os
 import sys
 import time
+import shutil
+import atexit
+import ctypes
+import msvcrt
 import threading
 import urllib.request
 from pathlib import Path
@@ -52,7 +56,57 @@ def start_backend():
         import traceback
         print(f"[SoundReels] Backend crashed: {exc}\n{traceback.format_exc()}", flush=True)
 
+WINDOW_TITLE = "SoundReels — Game SFX Explorer"
+
+def _focus_existing_window() -> bool:
+    """Brings an already-open SoundReels window to the foreground if present."""
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.FindWindowW(None, WINDOW_TITLE)
+        if hwnd and user32.IsWindowVisible(hwnd):
+            SW_RESTORE = 9
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(hwnd)
+            return True
+    except Exception:
+        pass
+    return False
+
+def _acquire_storage_dir() -> Path:
+    """Returns primary storage_dir if unlocked, or a clean temp dir so WebView2 never hits 0x800700AA."""
+    data_dir = ROOT_DIR / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    primary_dir = data_dir / "webview_storage"
+    primary_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = data_dir / "webview_storage.lock"
+
+    # Best-effort cleanup of old temp storage dirs
+    for stale in data_dir.glob("webview_storage_tmp_*"):
+        try:
+            shutil.rmtree(stale)
+        except Exception:
+            pass
+
+    try:
+        lock_fp = open(lock_path, "a+")
+        msvcrt.locking(lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
+        atexit.register(lambda: lock_fp.close())
+        return primary_dir
+    except OSError:
+        fallback_dir = data_dir / f"webview_storage_tmp_{os.getpid()}"
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        atexit.register(lambda: shutil.rmtree(fallback_dir, ignore_errors=True))
+        print(f"[SoundReels] Primary webview_storage in use; using clean folder {fallback_dir.name}", flush=True)
+        return fallback_dir
+
 def main():
+    # 0. If window already exists, bring it to front instead of opening a colliding WebView2 instance
+    if _focus_existing_window():
+        print("[SoundReels] Existing window focused; exiting duplicate launcher.", flush=True)
+        return
+
     # 1. Start backend thread if needed
     if not is_server_ready():
         server_thread = threading.Thread(target=start_backend, daemon=True)
@@ -64,13 +118,12 @@ def main():
                 break
             time.sleep(0.1)
 
-    storage_dir = ROOT_DIR / "data" / "webview_storage"
-    storage_dir.mkdir(parents=True, exist_ok=True)
+    storage_dir = _acquire_storage_dir()
     icon_path = ROOT_DIR / "assets" / "soundreels.ico"
 
     # 2. Launch Standalone Native Window (Spotify Dark Style)
     webview.create_window(
-        title="SoundReels — Game SFX Explorer",
+        title=WINDOW_TITLE,
         url="http://127.0.0.1:8000/",
         width=1380,
         height=880,
