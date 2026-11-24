@@ -1,25 +1,52 @@
-// SoundReels Application Logic (Spotify Style & Reels Keyboard Control)
+// SoundReels v1.2 Application Logic
+// Features: Scene Preview (Video + Frame-Accurate GIF), Scene/Audio Non-Destructive Trimmer & Undo,
+//           Scene-Audio Master Sync + Loop Modes, Original Source Direct Link, Reels Keyboard Flow
 
 let allSlots = [];
 let currentCategory = "all";
 let currentSlot = null;
 let currentCandidates = [];
 let currentIndex = -1;
-let compareDock = [null, null, null, null, null]; // 5 quick compare slots
-let isLooping = false;
+let compareDock = [null, null, null, null, null];
 
-// Web Audio API setup for live spectrum & ambient glow
+// Loop Modes: 'sync' (Scene+Audio Sync Loop) | 'audio' (Audio-Only Loop) | 'once' (1x then Next)
+let loopMode = "sync";
+
+// Web Audio API (Spectrum Ambient Glow + Waveform Decoding)
 let audioCtx = null;
 let analyser = null;
 let audioSource = null;
 let isAudioCtxSetup = false;
 
+// Bottom Waveform Trimmer State
+let waveformPeaks = [];
+let audioDuration = 0.0;
+let audioIn = 0.0;
+let audioOut = 0.0;
+let audioUndoStack = [];
+let audioDecodeAbort = null;
+let isDraggingAudioHandle = null; // 'in' | 'out' | 'scrub' | null
+
+// Scene Preview & Trimmer State
+let sceneMediaType = null; // 'video' | 'gif' | null
+let sceneDuration = 0.0;
+let sceneIn = 0.0;
+let sceneOut = 0.0;
+let soundOffset = 0.0;
+let sceneCurrentTime = 0.0;
+let sceneUndoStack = [];
+let sceneIsPlaying = true;
+let sceneLastTick = 0;
+let audioTriggeredThisCycle = false;
+
+// GIF Frame Player State
+let gifFrames = []; // [{ bitmap: ImageBitmap, start: number, end: number }]
+let gifDecodeAbort = null;
+
+// DOM Elements
 const audioPlayer = document.getElementById("audioPlayer");
-const canvas = document.getElementById("waveformCanvas");
-const ctx = canvas.getContext("2d");
 const ambientBackdrop = document.getElementById("ambientBackdrop");
 
-// UI Elements
 const currentSlotName = document.getElementById("currentSlotName");
 const currentSlotCategory = document.getElementById("currentSlotCategory");
 const currentSlotMemo = document.getElementById("currentSlotMemo");
@@ -27,17 +54,42 @@ const activeSlotBadge = document.getElementById("activeSlotBadge");
 const currentSoundName = document.getElementById("currentSoundName");
 const currentSoundMeta = document.getElementById("currentSoundMeta");
 const soundBadgeSource = document.getElementById("soundBadgeSource");
+const btnOpenSourceUrl = document.getElementById("btnOpenSourceUrl");
 const soundMatchScore = document.getElementById("soundMatchScore");
 const queuePosition = document.getElementById("queuePosition");
+const loadingSpinner = document.getElementById("loadingSpinner");
+
+// Transport & Waveform Elements
 const timeCurrent = document.getElementById("timeCurrent");
 const timeDuration = document.getElementById("timeDuration");
 const timeSeek = document.getElementById("timeSeek");
 const playIcon = document.getElementById("playIcon");
 const pauseIcon = document.getElementById("pauseIcon");
-const loadingSpinner = document.getElementById("loadingSpinner");
+const btnLoopMode = document.getElementById("btnLoopMode");
+const audioWaveformCanvas = document.getElementById("audioWaveformCanvas");
+const audioWaveformCtx = audioWaveformCanvas.getContext("2d");
+const audioInHandle = document.getElementById("audioInHandle");
+const audioOutHandle = document.getElementById("audioOutHandle");
+const audioTrimRangeLabel = document.getElementById("audioTrimRangeLabel");
+
+// Scene Elements
+const sceneStage = document.getElementById("sceneStage");
+const sceneDropPrompt = document.getElementById("sceneDropPrompt");
+const sceneVideo = document.getElementById("sceneVideo");
+const sceneGifCanvas = document.getElementById("sceneGifCanvas");
+const sceneGifCtx = sceneGifCanvas.getContext("2d");
+const sceneGifFallback = document.getElementById("sceneGifFallback");
+const sceneFileInput = document.getElementById("sceneFileInput");
+const sceneTrimBar = document.getElementById("sceneTrimBar");
+const sceneTimelineCanvas = document.getElementById("sceneTimelineCanvas");
+const sceneTimelineCtx = sceneTimelineCanvas.getContext("2d");
+const sceneTimeLabel = document.getElementById("sceneTimeLabel");
+const sceneTrimLabel = document.getElementById("sceneTrimLabel");
+const soundOffsetInput = document.getElementById("soundOffsetInput");
+const btnDeleteScene = document.getElementById("btnDeleteScene");
+
 const unityPathInput = document.getElementById("unityPathInput");
 
-// LocalStorage Persistence for Unity Path
 if (localStorage.getItem("soundreels_unity_path")) {
   unityPathInput.value = localStorage.getItem("soundreels_unity_path");
 }
@@ -45,62 +97,48 @@ unityPathInput.addEventListener("change", () => {
   localStorage.setItem("soundreels_unity_path", unityPathInput.value.trim());
 });
 
+// =========================================================================
+// Web Audio Initialization & Ambient Timbre Glow Loop
+// =========================================================================
+
 function initAudioContext() {
-  if (isAudioCtxSetup) {
-    if (audioCtx && audioCtx.state === "suspended") {
-      audioCtx.resume();
-    }
-    return;
-  }
-  try {
+  if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 128;
-    audioSource = audioCtx.createMediaElementSource(audioPlayer);
-    audioSource.connect(analyser);
-    analyser.connect(audioCtx.destination);
-    isAudioCtxSetup = true;
-    if (audioCtx.state === "suspended") {
-      audioCtx.resume();
+  }
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume().catch(() => {});
+  }
+  if (!isAudioCtxSetup) {
+    try {
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 128;
+      audioSource = audioCtx.createMediaElementSource(audioPlayer);
+      audioSource.connect(analyser);
+      analyser.connect(audioCtx.destination);
+      isAudioCtxSetup = true;
+    } catch (e) {
+      console.warn("Web Audio MediaElementSource setup skipped:", e);
     }
-    renderVisualizer();
-  } catch (e) {
-    console.warn("Web Audio API AudioContext waiting for user gesture:", e);
   }
 }
 
-function renderVisualizer() {
-  requestAnimationFrame(renderVisualizer);
-  if (!analyser) return;
-
+function updateAmbientGlow() {
+  if (!analyser || audioPlayer.paused) return;
   const bufferLength = analyser.frequencyBinCount;
   const dataArray = new Uint8Array(bufferLength);
   analyser.getByteFrequencyData(dataArray);
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const barWidth = (canvas.width / bufferLength) * 1.5;
-  let x = 0;
-  let totalEnergy = 0;
-  let lowEnergy = 0;
-  let highEnergy = 0;
-
+  let total = 0, low = 0, high = 0;
   for (let i = 0; i < bufferLength; i++) {
-    const barHeight = (dataArray[i] / 255) * canvas.height;
-    totalEnergy += dataArray[i];
-    if (i < bufferLength / 3) lowEnergy += dataArray[i];
-    else if (i > (bufferLength * 2) / 3) highEnergy += dataArray[i];
-
-    // Spotify green to cyan gradient for bars
-    ctx.fillStyle = `rgb(${Math.min(255, 30 + dataArray[i])}, ${Math.min(255, 185 + dataArray[i] / 2)}, ${Math.min(255, 84 + dataArray[i])})`;
-    ctx.fillRect(x, canvas.height - barHeight, barWidth - 1, barHeight);
-    x += barWidth;
+    total += dataArray[i];
+    if (i < bufferLength / 3) low += dataArray[i];
+    else if (i > (bufferLength * 2) / 3) high += dataArray[i];
   }
 
-  // Dynamic ambient backdrop color based on frequency spectrum
-  if (totalEnergy > 50) {
-    if (lowEnergy > highEnergy * 1.5) {
+  if (total > 40) {
+    if (low > high * 1.5) {
       ambientBackdrop.className = "absolute inset-0 opacity-25 pointer-events-none transition-colors duration-500 bg-red-700 blur-3xl";
-    } else if (highEnergy > lowEnergy * 1.2) {
+    } else if (high > low * 1.2) {
       ambientBackdrop.className = "absolute inset-0 opacity-25 pointer-events-none transition-colors duration-500 bg-cyan-600 blur-3xl";
     } else {
       ambientBackdrop.className = "absolute inset-0 opacity-25 pointer-events-none transition-colors duration-500 bg-emerald-600 blur-3xl";
@@ -108,15 +146,765 @@ function renderVisualizer() {
   }
 }
 
-// Resize canvas
-function resizeCanvas() {
-  canvas.width = canvas.parentElement.clientWidth || 400;
-  canvas.height = canvas.parentElement.clientHeight || 100;
-}
-window.addEventListener("resize", resizeCanvas);
-resizeCanvas();
+// =========================================================================
+// Master Animation & Sync Loop (Waveform Playhead + Scene/Audio Sync)
+// =========================================================================
 
-// --- API Calls ---
+function mainLoop(now) {
+  requestAnimationFrame(mainLoop);
+
+  if (!sceneLastTick) sceneLastTick = now;
+  const dt = Math.min(0.1, (now - sceneLastTick) / 1000.0);
+  sceneLastTick = now;
+
+  // 1. Update ambient glow
+  updateAmbientGlow();
+
+  // 2. Enforce Audio Trim Out Boundary
+  if (!audioPlayer.paused && audioDuration > 0) {
+    const effectiveOut = audioOut > audioIn ? audioOut : audioDuration;
+    if (audioPlayer.currentTime >= effectiveOut - 0.025) {
+      if (loopMode === "audio" || (loopMode === "sync" && !sceneMediaType)) {
+        audioPlayer.currentTime = audioIn;
+        audioPlayer.play().catch(() => {});
+      } else if (loopMode === "sync" && sceneMediaType) {
+        // Pause and wait for the scene loop to restart
+        audioPlayer.pause();
+        audioPlayer.currentTime = audioIn;
+      } else if (loopMode === "once") {
+        audioPlayer.pause();
+        if (currentIndex + 1 < currentCandidates.length) {
+          playCandidate(currentIndex + 1);
+        }
+      }
+    }
+  }
+
+  // 3. Drive Scene Media & Sync Trigger
+  if (sceneMediaType && sceneIsPlaying && sceneDuration > 0) {
+    const sIn = Math.max(0, sceneIn);
+    const sOut = sceneOut > sIn ? sceneOut : sceneDuration;
+
+    if (sceneMediaType === "video") {
+      if (!sceneVideo.paused) {
+        sceneCurrentTime = sceneVideo.currentTime;
+        if (sceneCurrentTime < sIn) {
+          sceneVideo.currentTime = sIn;
+          sceneCurrentTime = sIn;
+        }
+        if (sceneCurrentTime >= sOut - 0.02) {
+          sceneVideo.currentTime = sIn;
+          sceneCurrentTime = sIn;
+          audioTriggeredThisCycle = false;
+        }
+      }
+    } else if (sceneMediaType === "gif" && gifFrames.length > 0) {
+      sceneCurrentTime += dt;
+      if (sceneCurrentTime >= sOut || sceneCurrentTime < sIn) {
+        sceneCurrentTime = sIn;
+        audioTriggeredThisCycle = false;
+      }
+      drawGifFrameAt(sceneCurrentTime);
+    }
+
+    // Trigger Sound in Sync Mode when reaching sceneIn + soundOffset
+    if (loopMode === "sync" && !audioTriggeredThisCycle) {
+      const triggerAt = Math.min(sOut - 0.02, sIn + soundOffset);
+      if (sceneCurrentTime >= triggerAt) {
+        audioTriggeredThisCycle = true;
+        triggerAudioFromIn();
+      }
+    }
+
+    drawSceneTimeline();
+  }
+
+  // 4. Render Bottom Audio Waveform
+  drawAudioWaveform();
+}
+requestAnimationFrame(mainLoop);
+
+function triggerAudioFromIn() {
+  if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
+  initAudioContext();
+  audioPlayer.currentTime = audioIn;
+  audioPlayer.play().catch(() => {});
+}
+
+// =========================================================================
+// Bottom Audio Waveform & Interactive Trimmer
+// =========================================================================
+
+function resizeWaveformCanvas() {
+  const rect = audioWaveformCanvas.parentElement.getBoundingClientRect();
+  if (rect.width > 0) {
+    audioWaveformCanvas.width = rect.width;
+    audioWaveformCanvas.height = rect.height;
+  }
+  const tRect = sceneTimelineCanvas.parentElement.getBoundingClientRect();
+  if (tRect.width > 0) {
+    sceneTimelineCanvas.width = tRect.width;
+    sceneTimelineCanvas.height = tRect.height;
+  }
+}
+window.addEventListener("resize", resizeWaveformCanvas);
+resizeWaveformCanvas();
+
+async function decodeWaveformForCandidate(cand) {
+  if (audioDecodeAbort) audioDecodeAbort.abort();
+  audioDecodeAbort = new AbortController();
+
+  waveformPeaks = [];
+  audioDuration = cand.duration || 0;
+  audioIn = cand.audio_in || 0.0;
+  audioOut = cand.audio_out > 0 ? cand.audio_out : audioDuration;
+  audioUndoStack = [];
+  updateAudioTrimUI();
+
+  try {
+    initAudioContext();
+    const resp = await fetch(cand.audio_url, { signal: audioDecodeAbort.signal });
+    const buf = await resp.arrayBuffer();
+    const decoded = await audioCtx.decodeAudioData(buf);
+    audioDuration = decoded.duration;
+
+    if (cand.audio_out <= 0 || cand.audio_out > audioDuration) {
+      audioOut = audioDuration;
+    } else {
+      audioOut = cand.audio_out;
+    }
+    audioIn = Math.min(cand.audio_in || 0.0, Math.max(0, audioOut - 0.05));
+
+    // Extract peak envelope (~220 bars)
+    const ch = decoded.getChannelData(0);
+    const barCount = 220;
+    const blockSize = Math.max(1, Math.floor(ch.length / barCount));
+    const peaks = [];
+    let maxPeak = 0.001;
+    for (let i = 0; i < barCount; i++) {
+      let sum = 0;
+      const start = i * blockSize;
+      const end = Math.min(ch.length, start + blockSize);
+      for (let j = start; j < end; j++) {
+        const v = Math.abs(ch[j]);
+        if (v > sum) sum = v;
+      }
+      if (sum > maxPeak) maxPeak = sum;
+      peaks.push(sum);
+    }
+    waveformPeaks = peaks.map(p => p / maxPeak);
+    updateAudioTrimUI();
+  } catch (e) {
+    if (e.name !== "AbortError") {
+      console.warn("Waveform decode failed:", e);
+    }
+  }
+}
+
+function drawAudioWaveform() {
+  const w = audioWaveformCanvas.width;
+  const h = audioWaveformCanvas.height;
+  if (!w || !h) return;
+
+  audioWaveformCtx.clearRect(0, 0, w, h);
+
+  const dur = audioDuration || audioPlayer.duration || 1;
+  const inRatio = Math.max(0, Math.min(1, audioIn / dur));
+  const outRatio = Math.max(inRatio, Math.min(1, audioOut / dur));
+  const playRatio = Math.max(0, Math.min(1, (audioPlayer.currentTime || 0) / dur));
+
+  // Shade cut-out regions outside [audioIn, audioOut]
+  audioWaveformCtx.fillStyle = "rgba(0, 0, 0, 0.55)";
+  if (inRatio > 0) audioWaveformCtx.fillRect(0, 0, inRatio * w, h);
+  if (outRatio < 1) audioWaveformCtx.fillRect(outRatio * w, 0, (1 - outRatio) * w, h);
+
+  // Draw waveform bars
+  if (waveformPeaks.length > 0) {
+    const barW = w / waveformPeaks.length;
+    const midY = h / 2;
+    for (let i = 0; i < waveformPeaks.length; i++) {
+      const ratio = i / waveformPeaks.length;
+      const barH = Math.max(3, waveformPeaks[i] * (h * 0.85));
+      const inRange = ratio >= inRatio && ratio <= outRatio;
+      const passed = ratio <= playRatio && inRange;
+
+      if (!inRange) {
+        audioWaveformCtx.fillStyle = "#333333";
+      } else if (passed) {
+        audioWaveformCtx.fillStyle = "#1ed760";
+      } else {
+        audioWaveformCtx.fillStyle = "#1DB954";
+      }
+      audioWaveformCtx.fillRect(i * barW, midY - barH / 2, Math.max(1, barW - 1), barH);
+    }
+  } else {
+    // Subtle flat line placeholder
+    audioWaveformCtx.fillStyle = "#2b2b2b";
+    audioWaveformCtx.fillRect(0, h / 2 - 1, w, 2);
+  }
+
+  // Playhead cursor line
+  audioWaveformCtx.fillStyle = "#ffffff";
+  audioWaveformCtx.fillRect(playRatio * w - 1, 0, 2, h);
+}
+
+function updateAudioTrimUI() {
+  const dur = audioDuration || 1;
+  const inPct = Math.max(0, Math.min(100, (audioIn / dur) * 100));
+  const outPct = Math.max(inPct, Math.min(100, (audioOut / dur) * 100));
+  audioInHandle.style.left = `${inPct}%`;
+  audioOutHandle.style.left = `${outPct}%`;
+
+  const selLen = Math.max(0, audioOut - audioIn);
+  const isFull = audioIn <= 0.01 && Math.abs(audioOut - audioDuration) <= 0.05;
+  audioTrimRangeLabel.textContent = isFull
+    ? `구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)`
+    : `선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)`;
+}
+
+function pushAudioUndo() {
+  audioUndoStack.push([audioIn, audioOut]);
+  if (audioUndoStack.length > 20) audioUndoStack.shift();
+}
+
+async function saveAudioTrimToBackend() {
+  if (!currentSlot || currentIndex < 0 || !currentCandidates[currentIndex]) return;
+  const cand = currentCandidates[currentIndex];
+  cand.audio_in = audioIn;
+  cand.audio_out = audioOut;
+  try {
+    await fetch("/api/actions/trim_audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slot_id: currentSlot.id,
+        sound_id: cand.sound_id,
+        audio_in: Number(audioIn.toFixed(3)),
+        audio_out: Number(audioOut.toFixed(3)),
+      }),
+    });
+  } catch (e) {
+    console.error("Failed to save audio trim:", e);
+  }
+}
+
+// Mouse / Pointer Dragging on Waveform & Handles
+audioInHandle.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  pushAudioUndo();
+  isDraggingAudioHandle = "in";
+  audioInHandle.classList.add("dragging");
+});
+
+audioOutHandle.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  pushAudioUndo();
+  isDraggingAudioHandle = "out";
+  audioOutHandle.classList.add("dragging");
+});
+
+audioWaveformCanvas.addEventListener("pointerdown", (e) => {
+  if (audioDuration <= 0) return;
+  isDraggingAudioHandle = "scrub";
+  scrubAudioByEvent(e);
+});
+
+window.addEventListener("pointermove", (e) => {
+  if (!isDraggingAudioHandle || audioDuration <= 0) return;
+  const rect = audioWaveformCanvas.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const t = ratio * audioDuration;
+
+  if (isDraggingAudioHandle === "in") {
+    audioIn = Math.min(t, Math.max(0, audioOut - 0.05));
+    updateAudioTrimUI();
+  } else if (isDraggingAudioHandle === "out") {
+    audioOut = Math.max(t, Math.min(audioDuration, audioIn + 0.05));
+    updateAudioTrimUI();
+  } else if (isDraggingAudioHandle === "scrub") {
+    scrubAudioByEvent(e);
+  }
+});
+
+window.addEventListener("pointerup", () => {
+  if (isDraggingAudioHandle === "in" || isDraggingAudioHandle === "out") {
+    audioInHandle.classList.remove("dragging");
+    audioOutHandle.classList.remove("dragging");
+    saveAudioTrimToBackend();
+  }
+  isDraggingAudioHandle = null;
+});
+
+function scrubAudioByEvent(e) {
+  if (audioDuration <= 0) return;
+  const rect = audioWaveformCanvas.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  initAudioContext();
+  audioPlayer.currentTime = ratio * audioDuration;
+}
+
+// Audio Trim Buttons
+document.getElementById("btnAudioSetIn").addEventListener("click", () => {
+  if (audioDuration <= 0) return;
+  pushAudioUndo();
+  audioIn = Math.min(audioPlayer.currentTime, Math.max(0, audioOut - 0.05));
+  updateAudioTrimUI();
+  saveAudioTrimToBackend();
+});
+
+document.getElementById("btnAudioSetOut").addEventListener("click", () => {
+  if (audioDuration <= 0) return;
+  pushAudioUndo();
+  audioOut = Math.max(audioPlayer.currentTime, Math.min(audioDuration, audioIn + 0.05));
+  updateAudioTrimUI();
+  saveAudioTrimToBackend();
+});
+
+document.getElementById("btnAudioApply").addEventListener("click", async () => {
+  await saveAudioTrimToBackend();
+  triggerAudioFromIn();
+});
+
+document.getElementById("btnAudioUndo").addEventListener("click", async () => {
+  if (audioUndoStack.length === 0) return;
+  const [prevIn, prevOut] = audioUndoStack.pop();
+  audioIn = prevIn;
+  audioOut = prevOut;
+  updateAudioTrimUI();
+  await saveAudioTrimToBackend();
+});
+
+document.getElementById("btnAudioReset").addEventListener("click", async () => {
+  if (audioDuration <= 0) return;
+  pushAudioUndo();
+  audioIn = 0.0;
+  audioOut = audioDuration;
+  updateAudioTrimUI();
+  if (currentSlot && currentIndex >= 0 && currentCandidates[currentIndex]) {
+    const cand = currentCandidates[currentIndex];
+    cand.audio_in = 0.0;
+    cand.audio_out = 0.0;
+    await fetch("/api/actions/trim_audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slot_id: currentSlot.id,
+        sound_id: cand.sound_id,
+        audio_in: 0.0,
+        audio_out: 0.0,
+      }),
+    });
+  }
+});
+
+// =========================================================================
+// Scene Preview (Video + Frame-Accurate GIF Decoder) & Scene Trimmer
+// =========================================================================
+
+function clearGifFrames() {
+  for (const f of gifFrames) {
+    if (f.bitmap && typeof f.bitmap.close === "function") {
+      f.bitmap.close();
+    }
+  }
+  gifFrames = [];
+}
+
+function resetSceneUI() {
+  clearGifFrames();
+  if (gifDecodeAbort) gifDecodeAbort.abort();
+
+  sceneMediaType = null;
+  sceneDuration = 0.0;
+  sceneIn = 0.0;
+  sceneOut = 0.0;
+  soundOffset = 0.0;
+  sceneCurrentTime = 0.0;
+  sceneUndoStack = [];
+  audioTriggeredThisCycle = false;
+
+  sceneVideo.pause();
+  sceneVideo.removeAttribute("src");
+  sceneVideo.classList.add("hidden");
+  sceneGifCanvas.classList.add("hidden");
+  sceneGifFallback.removeAttribute("src");
+  sceneGifFallback.classList.add("hidden");
+
+  sceneDropPrompt.classList.remove("hidden");
+  sceneTrimBar.classList.add("hidden");
+  btnDeleteScene.classList.add("hidden");
+}
+
+async function loadSceneForSlot(slot) {
+  resetSceneUI();
+  if (!slot || !slot.scene_media_url) return;
+
+  sceneIn = slot.scene_in || 0.0;
+  sceneOut = slot.scene_out || 0.0;
+  soundOffset = slot.sound_offset || 0.0;
+  soundOffsetInput.value = soundOffset.toFixed(2);
+
+  sceneDropPrompt.classList.add("hidden");
+  sceneTrimBar.classList.remove("hidden");
+  btnDeleteScene.classList.remove("hidden");
+  resizeWaveformCanvas();
+
+  if (slot.scene_media_type === "video") {
+    sceneMediaType = "video";
+    sceneVideo.classList.remove("hidden");
+    sceneVideo.src = slot.scene_media_url;
+    sceneVideo.onloadedmetadata = () => {
+      sceneDuration = sceneVideo.duration || 1.0;
+      if (sceneOut <= 0 || sceneOut > sceneDuration) sceneOut = sceneDuration;
+      sceneIn = Math.min(sceneIn, Math.max(0, sceneOut - 0.05));
+      sceneVideo.currentTime = sceneIn;
+      sceneCurrentTime = sceneIn;
+      audioTriggeredThisCycle = false;
+      sceneIsPlaying = true;
+      sceneVideo.play().catch(() => {});
+      updateSceneTrimUI();
+    };
+  } else if (slot.scene_media_type === "gif") {
+    await loadGifScene(slot.scene_media_url);
+  }
+}
+
+async function loadGifScene(url) {
+  if (gifDecodeAbort) gifDecodeAbort.abort();
+  gifDecodeAbort = new AbortController();
+
+  // Check if ImageDecoder is supported (Chromium / Edge WebView2)
+  if (typeof ImageDecoder === "undefined") {
+    sceneMediaType = "gif";
+    sceneGifFallback.src = url;
+    sceneGifFallback.classList.remove("hidden");
+    sceneDuration = 2.0;
+    if (sceneOut <= 0) sceneOut = sceneDuration;
+    updateSceneTrimUI();
+    return;
+  }
+
+  try {
+    loadingSpinner.classList.remove("hidden");
+    const resp = await fetch(url, { signal: gifDecodeAbort.signal });
+    const buf = await resp.arrayBuffer();
+    const decoder = new ImageDecoder({ data: buf, type: "image/gif" });
+    await decoder.tracks.ready;
+
+    const track = decoder.tracks.selectedTrack;
+    const count = track.frameCount || 1;
+    let cursor = 0.0;
+    const frames = [];
+
+    for (let i = 0; i < count; i++) {
+      const result = await decoder.decode({ frameIndex: i });
+      const vf = result.image;
+      const durSec = Math.max(0.02, (vf.duration || 100000) / 1_000_000);
+      const bitmap = await createImageBitmap(vf);
+      vf.close();
+      frames.push({ bitmap, start: cursor, end: cursor + durSec });
+      cursor += durSec;
+    }
+    decoder.close();
+
+    gifFrames = frames;
+    sceneMediaType = "gif";
+    sceneDuration = cursor;
+    if (sceneOut <= 0 || sceneOut > sceneDuration) sceneOut = sceneDuration;
+    sceneIn = Math.min(sceneIn, Math.max(0, sceneOut - 0.05));
+    sceneCurrentTime = sceneIn;
+    audioTriggeredThisCycle = false;
+    sceneIsPlaying = true;
+
+    sceneGifCanvas.classList.remove("hidden");
+    if (gifFrames.length > 0) {
+      sceneGifCanvas.width = gifFrames[0].bitmap.width;
+      sceneGifCanvas.height = gifFrames[0].bitmap.height;
+      drawGifFrameAt(sceneIn);
+    }
+    updateSceneTrimUI();
+  } catch (e) {
+    if (e.name !== "AbortError") {
+      console.warn("GIF ImageDecoder failed, using fallback <img>:", e);
+      sceneGifFallback.src = url;
+      sceneGifFallback.classList.remove("hidden");
+    }
+  } finally {
+    loadingSpinner.classList.add("hidden");
+  }
+}
+
+function drawGifFrameAt(t) {
+  if (gifFrames.length === 0) return;
+  let frame = gifFrames[gifFrames.length - 1];
+  for (let i = 0; i < gifFrames.length; i++) {
+    if (t >= gifFrames[i].start && t < gifFrames[i].end) {
+      frame = gifFrames[i];
+      break;
+    }
+  }
+  sceneGifCtx.clearRect(0, 0, sceneGifCanvas.width, sceneGifCanvas.height);
+  sceneGifCtx.drawImage(frame.bitmap, 0, 0);
+}
+
+function drawSceneTimeline() {
+  const w = sceneTimelineCanvas.width;
+  const h = sceneTimelineCanvas.height;
+  if (!w || !h || sceneDuration <= 0) return;
+
+  sceneTimelineCtx.clearRect(0, 0, w, h);
+  const inR = Math.max(0, Math.min(1, sceneIn / sceneDuration));
+  const outR = Math.max(inR, Math.min(1, (sceneOut > 0 ? sceneOut : sceneDuration) / sceneDuration));
+  const curR = Math.max(0, Math.min(1, sceneCurrentTime / sceneDuration));
+
+  // Background track
+  sceneTimelineCtx.fillStyle = "#262626";
+  sceneTimelineCtx.fillRect(0, 0, w, h);
+
+  // Active trimmed window
+  sceneTimelineCtx.fillStyle = "#1DB954";
+  sceneTimelineCtx.fillRect(inR * w, 0, Math.max(2, (outR - inR) * w), h);
+
+  // Sound offset pin if > 0
+  if (soundOffset > 0) {
+    const trigR = Math.min(1, (sceneIn + soundOffset) / sceneDuration);
+    sceneTimelineCtx.fillStyle = "#f59e0b";
+    sceneTimelineCtx.fillRect(trigR * w - 1, 0, 2, h);
+  }
+
+  // Playhead
+  sceneTimelineCtx.fillStyle = "#ffffff";
+  sceneTimelineCtx.fillRect(curR * w - 1, 0, 2, h);
+
+  sceneTimeLabel.textContent = `${sceneCurrentTime.toFixed(2)}s / ${sceneDuration.toFixed(2)}s`;
+}
+
+function updateSceneTrimUI() {
+  const effectiveOut = sceneOut > 0 ? sceneOut : sceneDuration;
+  const isFull = sceneIn <= 0.01 && Math.abs(effectiveOut - sceneDuration) <= 0.05;
+  sceneTrimLabel.textContent = isFull
+    ? "구간: 전체"
+    : `${sceneIn.toFixed(2)}s ~ ${effectiveOut.toFixed(2)}s`;
+  drawSceneTimeline();
+}
+
+function pushSceneUndo() {
+  sceneUndoStack.push([sceneIn, sceneOut, soundOffset]);
+  if (sceneUndoStack.length > 20) sceneUndoStack.shift();
+}
+
+async function saveSceneTrimToBackend() {
+  if (!currentSlot) return;
+  currentSlot.scene_in = sceneIn;
+  currentSlot.scene_out = sceneOut;
+  currentSlot.sound_offset = soundOffset;
+  try {
+    await fetch(`/api/slots/${currentSlot.id}/scene/trim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scene_in: Number(sceneIn.toFixed(3)),
+        scene_out: Number(sceneOut.toFixed(3)),
+        sound_offset: Number(soundOffset.toFixed(3)),
+      }),
+    });
+  } catch (e) {
+    console.error("Failed to save scene trim:", e);
+  }
+}
+
+// Scene Upload (Click + Drag & Drop)
+async function uploadSceneFile(file) {
+  if (!currentSlot || !file) return;
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    loadingSpinner.classList.remove("hidden");
+    const res = await fetch(`/api/slots/${currentSlot.id}/scene`, {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json();
+    loadingSpinner.classList.add("hidden");
+
+    if (!res.ok) {
+      alert(`장면 업로드 실패: ${data.detail || "지원되지 않는 형식입니다."}`);
+      return;
+    }
+
+    currentSlot.scene_media_type = data.scene_media_type;
+    currentSlot.scene_media_url = data.scene_media_url;
+    currentSlot.scene_in = 0.0;
+    currentSlot.scene_out = 0.0;
+    currentSlot.sound_offset = 0.0;
+    await loadSceneForSlot(currentSlot);
+  } catch (e) {
+    loadingSpinner.classList.add("hidden");
+    alert(`업로드 오류: ${e}`);
+  }
+}
+
+sceneStage.addEventListener("click", (e) => {
+  // Only open file picker if no scene yet (when scene exists, clicking toggles play/pause)
+  if (!sceneMediaType) {
+    sceneFileInput.click();
+  } else {
+    sceneIsPlaying = !sceneIsPlaying;
+    if (sceneMediaType === "video") {
+      if (sceneIsPlaying) sceneVideo.play().catch(() => {});
+      else sceneVideo.pause();
+    }
+  }
+});
+
+document.getElementById("btnUploadSceneTop").addEventListener("click", (e) => {
+  e.stopPropagation();
+  sceneFileInput.click();
+});
+
+sceneFileInput.addEventListener("change", (e) => {
+  if (e.target.files && e.target.files[0]) {
+    uploadSceneFile(e.target.files[0]);
+    e.target.value = "";
+  }
+});
+
+sceneStage.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  sceneStage.classList.add("drag-over");
+});
+
+sceneStage.addEventListener("dragleave", () => {
+  sceneStage.classList.remove("drag-over");
+});
+
+sceneStage.addEventListener("drop", (e) => {
+  e.preventDefault();
+  sceneStage.classList.remove("drag-over");
+  if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+    uploadSceneFile(e.dataTransfer.files[0]);
+  }
+});
+
+btnDeleteScene.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  if (!currentSlot) return;
+  await fetch(`/api/slots/${currentSlot.id}/scene`, { method: "DELETE" });
+  currentSlot.scene_media_url = null;
+  currentSlot.scene_media_type = null;
+  resetSceneUI();
+});
+
+// Scene Timeline Scrub & Trim Controls
+sceneTimelineCanvas.addEventListener("pointerdown", (e) => {
+  if (sceneDuration <= 0) return;
+  const rect = sceneTimelineCanvas.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const target = ratio * sceneDuration;
+  sceneCurrentTime = target;
+  if (sceneMediaType === "video") {
+    sceneVideo.currentTime = target;
+  } else if (sceneMediaType === "gif") {
+    drawGifFrameAt(target);
+  }
+  drawSceneTimeline();
+});
+
+document.getElementById("btnSceneSetIn").addEventListener("click", () => {
+  if (sceneDuration <= 0) return;
+  pushSceneUndo();
+  const effectiveOut = sceneOut > 0 ? sceneOut : sceneDuration;
+  sceneIn = Math.min(sceneCurrentTime, Math.max(0, effectiveOut - 0.05));
+  updateSceneTrimUI();
+  saveSceneTrimToBackend();
+});
+
+document.getElementById("btnSceneSetOut").addEventListener("click", () => {
+  if (sceneDuration <= 0) return;
+  pushSceneUndo();
+  sceneOut = Math.max(sceneCurrentTime, Math.min(sceneDuration, sceneIn + 0.05));
+  updateSceneTrimUI();
+  saveSceneTrimToBackend();
+});
+
+document.getElementById("btnSceneApply").addEventListener("click", async () => {
+  soundOffset = Math.max(0, parseFloat(soundOffsetInput.value) || 0.0);
+  await saveSceneTrimToBackend();
+  // Restart scene & audio in sync from sceneIn!
+  sceneCurrentTime = sceneIn;
+  if (sceneMediaType === "video") sceneVideo.currentTime = sceneIn;
+  audioTriggeredThisCycle = false;
+  sceneIsPlaying = true;
+});
+
+document.getElementById("btnSceneUndo").addEventListener("click", async () => {
+  if (sceneUndoStack.length === 0) return;
+  const [prevIn, prevOut, prevOffset] = sceneUndoStack.pop();
+  sceneIn = prevIn;
+  sceneOut = prevOut;
+  soundOffset = prevOffset;
+  soundOffsetInput.value = soundOffset.toFixed(2);
+  updateSceneTrimUI();
+  await saveSceneTrimToBackend();
+});
+
+document.getElementById("btnSceneReset").addEventListener("click", async () => {
+  if (sceneDuration <= 0) return;
+  pushSceneUndo();
+  sceneIn = 0.0;
+  sceneOut = sceneDuration;
+  soundOffset = 0.0;
+  soundOffsetInput.value = "0.00";
+  updateSceneTrimUI();
+  if (currentSlot) {
+    currentSlot.scene_in = 0.0;
+    currentSlot.scene_out = 0.0;
+    currentSlot.sound_offset = 0.0;
+    await fetch(`/api/slots/${currentSlot.id}/scene/trim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene_in: 0.0, scene_out: 0.0, sound_offset: 0.0 }),
+    });
+  }
+});
+
+soundOffsetInput.addEventListener("change", () => {
+  pushSceneUndo();
+  soundOffset = Math.max(0, parseFloat(soundOffsetInput.value) || 0.0);
+  saveSceneTrimToBackend();
+  drawSceneTimeline();
+});
+
+// =========================================================================
+// Original Source Link Opening
+// =========================================================================
+
+async function openOriginalSource(url) {
+  if (!url) return;
+  if (window.pywebview) {
+    try {
+      await fetch("/api/open_external_url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      return;
+    } catch (e) {
+      console.warn("Desktop external open failed, falling back to window.open:", e);
+    }
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+btnOpenSourceUrl.addEventListener("click", () => {
+  const url = btnOpenSourceUrl.dataset.url;
+  if (url) openOriginalSource(url);
+});
+
+// =========================================================================
+// Slots & Candidates API Calls
+// =========================================================================
 
 async function loadSlots() {
   try {
@@ -126,7 +914,6 @@ async function loadSlots() {
     renderSlotsList();
     updateProgress();
 
-    // Select first slot with candidates or first slot
     if (!currentSlot && allSlots.length > 0) {
       const firstActive = allSlots.find(s => s.candidate_count > 0) || allSlots[0];
       selectSlot(firstActive.id);
@@ -146,7 +933,9 @@ async function selectSlot(slotId) {
   currentSlotMemo.textContent = slot.memo;
   activeSlotBadge.textContent = `${slot.name} (${slot.candidate_count || 0} 후보)`;
 
-  // Fetch candidates
+  // Load slot's attached scene media if any
+  await loadSceneForSlot(slot);
+
   try {
     loadingSpinner.classList.remove("hidden");
     const res = await fetch(`/api/slots/${slotId}/candidates`);
@@ -160,12 +949,15 @@ async function selectSlot(slotId) {
     if (currentCandidates.length > 0) {
       playCandidate(0);
     } else {
-      // Clean stop if no candidates
       audioPlayer.pause();
       audioPlayer.removeAttribute("src");
+      waveformPeaks = [];
+      audioDuration = 0;
+      btnOpenSourceUrl.classList.add("hidden");
       currentSoundName.textContent = "후보 사운드 없음";
       currentSoundMeta.textContent = "LotsOfSounds 검색 중이거나 대기 상태";
       queuePosition.textContent = "0 / 0";
+      updateAudioTrimUI();
     }
   } catch (e) {
     loadingSpinner.classList.add("hidden");
@@ -186,7 +978,20 @@ function playCandidate(index) {
   soundMatchScore.textContent = `${Math.round(cand.score * 100)}% Match`;
   queuePosition.textContent = `${index + 1} / ${currentCandidates.length}`;
 
-  // Update button like state
+  // Show/hide Original Source Link button
+  const srcUrl = cand.original_source_url || cand.catalog_url;
+  if (srcUrl) {
+    btnOpenSourceUrl.dataset.url = srcUrl;
+    const isFs = srcUrl.includes("freesound.org");
+    btnOpenSourceUrl.querySelector("span:first-child").textContent = isFs ? "🔗 원본 출처 (Freesound)" : "🔗 원본 출처";
+    btnOpenSourceUrl.classList.remove("hidden");
+    btnOpenSourceUrl.classList.add("inline-flex");
+  } else {
+    btnOpenSourceUrl.classList.add("hidden");
+    btnOpenSourceUrl.classList.remove("inline-flex");
+  }
+
+  // Update Like button state
   const btnLike = document.getElementById("btnLike");
   if (cand.candidate_status === "liked") {
     btnLike.classList.add("text-yellow-400", "border-yellow-500");
@@ -194,22 +999,41 @@ function playCandidate(index) {
     btnLike.classList.remove("text-yellow-400", "border-yellow-500");
   }
 
-  // Clear dock active highlights
   document.querySelectorAll(".dock-btn").forEach(b => b.classList.remove("active", "border-[#1DB954]"));
 
-  // Load and play audio
+  // Decode bottom waveform & load trim boundaries
+  decodeWaveformForCandidate(cand);
+
+  // Load audio & sync with scene if present
+  audioPlayer.pause();
   audioPlayer.src = cand.audio_url;
+  audioPlayer.onloadedmetadata = () => {
+    const startAt = cand.audio_in || 0.0;
+    audioPlayer.currentTime = startAt;
+    if (loopMode === "sync" && sceneMediaType) {
+      // Restart scene from sceneIn so scene & new sound start together!
+      sceneCurrentTime = sceneIn;
+      if (sceneMediaType === "video") {
+        sceneVideo.currentTime = sceneIn;
+        if (sceneIsPlaying) sceneVideo.play().catch(() => {});
+      }
+      audioTriggeredThisCycle = false;
+    } else {
+      audioPlayer.play().catch(() => {});
+    }
+  };
   audioPlayer.load();
-  audioPlayer.play().catch(err => console.log("Auto-play waiting for key/click gesture:", err));
 
   renderCandidatesQueue();
 }
 
-// --- Render Methods ---
+// =========================================================================
+// Render Methods
+// =========================================================================
 
 function renderSlotsList() {
   const container = document.getElementById("tabSlots");
-  const previousScroll = container.scrollTop; // Preserve scroll position during polling
+  const previousScroll = container.scrollTop;
   container.innerHTML = "";
 
   const filtered = allSlots.filter(s => {
@@ -222,7 +1046,7 @@ function renderSlotsList() {
   filtered.forEach(s => {
     const item = document.createElement("div");
     item.className = `slot-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-xs ${currentSlot && currentSlot.id === s.id ? "active bg-[#282828]" : "bg-[#181818]"}`;
-    
+
     let statusBadge = "";
     if (s.status === "confirmed") {
       statusBadge = `<span class="bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] px-1.5 py-0.5 rounded font-bold">확정</span>`;
@@ -234,9 +1058,10 @@ function renderSlotsList() {
       statusBadge = `<span class="bg-[#242424] text-gray-400 text-[10px] px-1.5 py-0.5 rounded">탐색 중</span>`;
     }
 
+    const sceneIcon = s.scene_media_url ? "🎬 " : "";
     item.innerHTML = `
       <div class="truncate max-w-[190px]">
-        <div class="font-bold text-gray-200 truncate">${s.name}</div>
+        <div class="font-bold text-gray-200 truncate">${sceneIcon}${s.name}</div>
         <div class="text-[11px] text-gray-500 truncate">${s.memo}</div>
       </div>
       <div>${statusBadge}</div>
@@ -255,18 +1080,40 @@ function renderCandidatesQueue() {
   currentCandidates.forEach((c, idx) => {
     const item = document.createElement("div");
     item.className = `candidate-item p-2 rounded flex items-center justify-between cursor-pointer text-xs ${idx === currentIndex ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#222]"}`;
-    
+
     const likeIcon = c.candidate_status === "liked" ? "⭐ " : "";
     const confirmedTag = c.candidate_status === "confirmed" ? " [확정]" : "";
+    const srcUrl = c.original_source_url || c.catalog_url;
 
-    item.innerHTML = `
-      <div class="truncate max-w-[190px]">
-        <div class="font-semibold text-gray-200 truncate">${likeIcon}${c.name}${confirmedTag}</div>
-        <div class="text-[10px] text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}%</div>
-      </div>
-      <button class="text-gray-500 hover:text-white px-1.5 py-0.5 text-[10px] bg-[#242424] rounded">듣기</button>
+    const infoDiv = document.createElement("div");
+    infoDiv.className = "truncate max-w-[175px]";
+    infoDiv.innerHTML = `
+      <div class="font-semibold text-gray-200 truncate">${likeIcon}${c.name}${confirmedTag}</div>
+      <div class="text-[10px] text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}%</div>
     `;
 
+    const btnsDiv = document.createElement("div");
+    btnsDiv.className = "flex items-center gap-1 shrink-0";
+
+    if (srcUrl) {
+      const linkBtn = document.createElement("button");
+      linkBtn.title = "원본 출처 사이트 열기";
+      linkBtn.className = "text-sky-400 hover:text-sky-200 px-1.5 py-0.5 text-[10px] bg-[#242424] rounded border border-sky-900/40";
+      linkBtn.textContent = "🔗";
+      linkBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openOriginalSource(srcUrl);
+      });
+      btnsDiv.appendChild(linkBtn);
+    }
+
+    const playBtn = document.createElement("button");
+    playBtn.className = "text-gray-400 hover:text-white px-1.5 py-0.5 text-[10px] bg-[#242424] rounded";
+    playBtn.textContent = "듣기";
+    btnsDiv.appendChild(playBtn);
+
+    item.appendChild(infoDiv);
+    item.appendChild(btnsDiv);
     item.addEventListener("click", () => playCandidate(idx));
     container.appendChild(item);
   });
@@ -280,7 +1127,34 @@ function updateProgress() {
   document.getElementById("progressBar").style.width = `${pct}%`;
 }
 
-// --- Action Handlers ---
+// =========================================================================
+// Loop Mode Toggle (Sync Loop <-> Audio-Only Loop <-> Play Once)
+// =========================================================================
+
+function cycleLoopMode() {
+  if (loopMode === "sync") {
+    loopMode = "audio";
+    btnLoopMode.textContent = "🔁 🔊 소리만 반복";
+    btnLoopMode.classList.remove("text-emerald-400");
+    btnLoopMode.classList.add("text-amber-400");
+  } else if (loopMode === "audio") {
+    loopMode = "once";
+    btnLoopMode.textContent = "⏭️ 1회 후 다음";
+    btnLoopMode.classList.remove("text-amber-400");
+    btnLoopMode.classList.add("text-gray-300");
+  } else {
+    loopMode = "sync";
+    btnLoopMode.textContent = "🔁 🎬+🔊 싱크 반복";
+    btnLoopMode.classList.remove("text-gray-300");
+    btnLoopMode.classList.add("text-emerald-400");
+  }
+}
+
+btnLoopMode.addEventListener("click", cycleLoopMode);
+
+// =========================================================================
+// Action Handlers (Like, Similar, Mutate, Confirm, Export)
+// =========================================================================
 
 async function toggleLikeCurrent() {
   if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
@@ -290,16 +1164,11 @@ async function toggleLikeCurrent() {
     const res = await fetch("/api/actions/like", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slot_id: currentSlot.id, sound_id: cand.sound_id })
+      body: JSON.stringify({ slot_id: currentSlot.id, sound_id: cand.sound_id }),
     });
     const data = await res.json();
     cand.candidate_status = data.new_candidate_status;
-
-    // Update Quick Compare Dock
-    if (cand.candidate_status === "liked") {
-      addToCompareDock(cand);
-    }
-
+    if (cand.candidate_status === "liked") addToCompareDock(cand);
     renderCandidatesQueue();
     playCandidate(currentIndex);
   } catch (e) {
@@ -310,11 +1179,9 @@ async function toggleLikeCurrent() {
 function addToCompareDock(sound) {
   const existingIdx = compareDock.findIndex(s => s && s.sound_id === sound.sound_id);
   if (existingIdx !== -1) return;
-
   const emptyIdx = compareDock.findIndex(s => s === null);
-  if (emptyIdx !== -1) {
-    compareDock[emptyIdx] = sound;
-  } else {
+  if (emptyIdx !== -1) compareDock[emptyIdx] = sound;
+  else {
     compareDock.shift();
     compareDock.push(sound);
   }
@@ -338,7 +1205,6 @@ function updateCompareDockUI() {
   });
 }
 
-// Action: F (Similar Sounds)
 async function triggerSimilarCurrent() {
   if (currentIndex < 0 || !currentCandidates[currentIndex] || !currentSlot) return;
   const cand = currentCandidates[currentIndex];
@@ -346,10 +1212,9 @@ async function triggerSimilarCurrent() {
     const res = await fetch("/api/actions/reorder_similar", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slot_id: currentSlot.id, reference_sound_id: cand.sound_id })
+      body: JSON.stringify({ slot_id: currentSlot.id, reference_sound_id: cand.sound_id }),
     });
     if (res.ok) {
-      // Reload candidates
       const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates`);
       const cData = await cRes.json();
       currentCandidates = cData.candidates || [];
@@ -361,7 +1226,6 @@ async function triggerSimilarCurrent() {
   }
 }
 
-// Action: M (Mutate Take)
 async function triggerMutateCurrent() {
   if (currentIndex < 0 || !currentCandidates[currentIndex] || !currentSlot) return;
   const cand = currentCandidates[currentIndex];
@@ -370,11 +1234,10 @@ async function triggerMutateCurrent() {
     const res = await fetch("/api/actions/mutate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slot_id: currentSlot.id, sound_id: cand.sound_id })
+      body: JSON.stringify({ slot_id: currentSlot.id, sound_id: cand.sound_id }),
     });
     loadingSpinner.classList.add("hidden");
     if (res.ok) {
-      // Reload candidates
       const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates`);
       const cData = await cRes.json();
       currentCandidates = cData.candidates || [];
@@ -393,16 +1256,15 @@ async function confirmCurrent() {
   const unityPath = unityPathInput.value.trim();
 
   try {
-    const res = await fetch("/api/actions/confirm", {
+    await fetch("/api/actions/confirm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         slot_id: currentSlot.id,
         sound_id: cand.sound_id,
-        unity_project_path: unityPath || null
-      })
+        unity_project_path: unityPath || null,
+      }),
     });
-    const data = await res.json();
     cand.candidate_status = "confirmed";
     currentSlot.status = "confirmed";
 
@@ -410,17 +1272,13 @@ async function confirmCurrent() {
     renderSlotsList();
     updateProgress();
 
-    // Move to next pending slot automatically (Reels flow!)
     const nextSlot = allSlots.find(s => s.status !== "confirmed" && s.status !== "on_hold");
-    if (nextSlot) {
-      selectSlot(nextSlot.id);
-    }
+    if (nextSlot) selectSlot(nextSlot.id);
   } catch (e) {
     console.error("Confirm error:", e);
   }
 }
 
-// Batch Unity Export Handler
 document.getElementById("btnUnityExport").addEventListener("click", async () => {
   const unityPath = unityPathInput.value.trim();
   if (!unityPath) {
@@ -433,11 +1291,11 @@ document.getElementById("btnUnityExport").addEventListener("click", async () => 
     const res = await fetch("/api/export/batch_unity", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ unity_project_path: unityPath })
+      body: JSON.stringify({ unity_project_path: unityPath }),
     });
     const data = await res.json();
     if (res.ok) {
-      alert(`[내보내기 완료!] 총 ${data.exported_count}개의 확정 사운드가 무음 제거 및 -1dBFS 마스터링된 WAV 파일로 Assets/Audio/SFX 에 복사되었으며 CREDITS.txt가 작성되었습니다.`);
+      alert(`[내보내기 완료!] 총 ${data.exported_count}개의 확정 사운드가 설정한 트림 구간 및 -1dBFS 마스터링 WAV로 복사되었으며 CREDITS.txt가 작성되었습니다.`);
     } else {
       alert(`내보내기 실패: ${data.detail || "오류 발생"}`);
     }
@@ -446,13 +1304,16 @@ document.getElementById("btnUnityExport").addEventListener("click", async () => 
   }
 });
 
-// --- Player Events ---
+// =========================================================================
+// Player Events & Controls
+// =========================================================================
 
 audioPlayer.addEventListener("timeupdate", () => {
-  if (!audioPlayer.duration) return;
+  const dur = audioDuration || audioPlayer.duration;
+  if (!dur) return;
   timeCurrent.textContent = formatTime(audioPlayer.currentTime);
-  timeDuration.textContent = formatTime(audioPlayer.duration);
-  timeSeek.value = (audioPlayer.currentTime / audioPlayer.duration) * 100;
+  timeDuration.textContent = formatTime(dur);
+  timeSeek.value = (audioPlayer.currentTime / dur) * 100;
 });
 
 audioPlayer.addEventListener("play", () => {
@@ -466,11 +1327,10 @@ audioPlayer.addEventListener("pause", () => {
 });
 
 audioPlayer.addEventListener("ended", () => {
-  if (isLooping) {
-    audioPlayer.currentTime = 0;
-    audioPlayer.play();
-  } else {
-    // Auto advance to next in reels mode
+  if (loopMode === "audio" || (loopMode === "sync" && !sceneMediaType)) {
+    audioPlayer.currentTime = audioIn;
+    audioPlayer.play().catch(() => {});
+  } else if (loopMode === "once") {
     if (currentIndex + 1 < currentCandidates.length) {
       playCandidate(currentIndex + 1);
     }
@@ -484,15 +1344,35 @@ function formatTime(sec) {
 }
 
 timeSeek.addEventListener("input", () => {
-  if (!audioPlayer.duration) return;
-  audioPlayer.currentTime = (timeSeek.value / 100) * audioPlayer.duration;
+  const dur = audioDuration || audioPlayer.duration;
+  if (!dur) return;
+  audioPlayer.currentTime = (timeSeek.value / 100) * dur;
 });
 
-// Controls
 document.getElementById("btnPlay").addEventListener("click", () => {
   initAudioContext();
-  if (audioPlayer.paused) audioPlayer.play();
-  else audioPlayer.pause();
+  if (audioPlayer.paused) {
+    if (loopMode === "sync" && sceneMediaType) {
+      sceneCurrentTime = sceneIn;
+      if (sceneMediaType === "video") {
+        sceneVideo.currentTime = sceneIn;
+        sceneVideo.play().catch(() => {});
+      }
+      sceneIsPlaying = true;
+      audioTriggeredThisCycle = false;
+    } else {
+      if (audioPlayer.currentTime < audioIn || audioPlayer.currentTime >= audioOut) {
+        audioPlayer.currentTime = audioIn;
+      }
+      audioPlayer.play().catch(() => {});
+    }
+  } else {
+    audioPlayer.pause();
+    if (loopMode === "sync" && sceneMediaType) {
+      sceneIsPlaying = false;
+      if (sceneMediaType === "video") sceneVideo.pause();
+    }
+  }
 });
 
 document.getElementById("btnNext").addEventListener("click", () => {
@@ -508,13 +1388,6 @@ document.getElementById("btnSimilar").addEventListener("click", triggerSimilarCu
 document.getElementById("btnMutate").addEventListener("click", triggerMutateCurrent);
 document.getElementById("btnConfirm").addEventListener("click", confirmCurrent);
 
-document.getElementById("btnLoop").addEventListener("click", () => {
-  isLooping = !isLooping;
-  const loopBtn = document.getElementById("btnLoop");
-  loopBtn.classList.toggle("text-emerald-400", isLooping);
-});
-
-// Category filtering
 document.querySelectorAll(".cat-btn").forEach(btn => {
   btn.addEventListener("click", (e) => {
     document.querySelectorAll(".cat-btn").forEach(b => b.classList.remove("active", "text-white", "bg-[#282828]"));
@@ -524,7 +1397,6 @@ document.querySelectorAll(".cat-btn").forEach(btn => {
   });
 });
 
-// Tabs
 document.getElementById("tabSlotsBtn").addEventListener("click", () => {
   document.getElementById("tabSlots").classList.remove("hidden");
   document.getElementById("tabCandidates").classList.add("hidden");
@@ -539,16 +1411,12 @@ document.getElementById("tabCandidatesBtn").addEventListener("click", () => {
   document.getElementById("tabSlotsBtn").classList.remove("border-[#1DB954]", "text-white");
 });
 
-// Left panel toggle
 document.getElementById("toggleLeftBtn").addEventListener("click", () => {
-  const panel = document.getElementById("leftPanel");
-  panel.classList.toggle("hidden");
+  document.getElementById("leftPanel").classList.toggle("hidden");
 });
 
-// Search input
 document.getElementById("searchInput").addEventListener("input", renderSlotsList);
 
-// Dock button click
 document.querySelectorAll(".dock-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     const idx = parseInt(btn.dataset.dock, 10);
@@ -556,21 +1424,24 @@ document.querySelectorAll(".dock-btn").forEach(btn => {
     if (sound) {
       document.querySelectorAll(".dock-btn").forEach(b => b.classList.remove("active", "border-[#1DB954]"));
       btn.classList.add("active", "border-[#1DB954]");
-      
+
       const cIdx = currentCandidates.findIndex(c => c.sound_id === sound.sound_id);
       if (cIdx !== -1) {
         playCandidate(cIdx);
       } else {
         initAudioContext();
         audioPlayer.src = sound.audio_url || `/api/sounds/${sound.sound_id}/audio`;
-        audioPlayer.play();
+        audioPlayer.play().catch(() => {});
         currentSoundName.textContent = sound.name;
       }
     }
   });
 });
 
-// --- Keyboard Shortcuts (Reels Flow) ---
+// =========================================================================
+// Keyboard Shortcuts (Reels + Scene Sync + Original Source 'O')
+// =========================================================================
+
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
 
@@ -582,9 +1453,7 @@ window.addEventListener("keydown", (e) => {
     if (currentIndex - 1 >= 0) playCandidate(currentIndex - 1);
   } else if (e.key === " " || e.code === "Space") {
     e.preventDefault();
-    initAudioContext();
-    if (audioPlayer.paused) audioPlayer.play();
-    else audioPlayer.pause();
+    document.getElementById("btnPlay").click();
   } else if (e.key === "s" || e.key === "S") {
     e.preventDefault();
     toggleLikeCurrent();
@@ -594,12 +1463,16 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "m" || e.key === "M") {
     e.preventDefault();
     triggerMutateCurrent();
+  } else if (e.key === "o" || e.key === "O") {
+    e.preventDefault();
+    const url = btnOpenSourceUrl.dataset.url;
+    if (url) openOriginalSource(url);
   } else if (e.key === "Enter") {
     e.preventDefault();
     confirmCurrent();
   } else if (e.key === "l" || e.key === "L") {
     e.preventDefault();
-    document.getElementById("btnLoop").click();
+    cycleLoopMode();
   } else if (["1", "2", "3", "4", "5"].includes(e.key)) {
     const dockIdx = parseInt(e.key, 10) - 1;
     const btn = document.querySelector(`.dock-btn[data-dock="${dockIdx}"]`);
@@ -607,6 +1480,6 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-// Load slots initially
+// Initial load & poll
 loadSlots();
-setInterval(loadSlots, 10000); // Auto poll updates
+setInterval(loadSlots, 10000);

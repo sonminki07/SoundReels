@@ -41,3 +41,36 @@
   background-color: #222222;
   color: #1DB954;
 }
+
+/* Scene Drag & Drop */
+#sceneStage.drag-over {
+  border-color: #1DB954 !important;
+  background-color: rgba(29, 185, 84, 0.12) !important;
+}
+
+/* Waveform Trim Handles */
+.trim-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  margin-left: -5px;
+  cursor: ew-resize;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.trim-handle .trim-grip {
+  width: 3px;
+  height: 100%;
+  box-shadow: 0 0 6px rgba(29, 185, 84, 0.8);
+  transition: width 0.1s ease;
+}
+
+.trim-handle:hover .trim-grip,
+.trim-handle.dragging .trim-grip {
+  width: 5px;
+  background-color: #ffffff;
+}

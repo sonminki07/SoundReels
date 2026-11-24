@@ -10,6 +10,7 @@ from contextlib import contextmanager
 BASE_DIR = Path(__file__).resolve().parents[3]
 DB_PATH = Path(os.getenv("SOUNDREELS_DB_PATH", BASE_DIR / "data" / "db" / "soundreels.db"))
 AUDIO_CACHE_DIR = Path(os.getenv("SOUNDREELS_CACHE_DIR", BASE_DIR / "data" / "audio_cache"))
+SCENE_CACHE_DIR = Path(os.getenv("SOUNDREELS_SCENE_DIR", BASE_DIR / "data" / "scene_cache"))
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -30,7 +31,15 @@ def get_db_context():
     finally:
         conn.close()
 
+def _ensure_column(c: sqlite3.Cursor, table: str, column: str, definition: str):
+    """Idempotently adds a column to an existing SQLite table."""
+    c.execute(f"PRAGMA table_info({table});")
+    existing = {row[1] for row in c.fetchall()}
+    if column not in existing:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition};")
+
 def init_db():
+    SCENE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with get_db_context() as conn:
         c = conn.cursor()
         
@@ -58,6 +67,11 @@ def init_db():
             clap_prompts TEXT, -- JSON array of strings
             search_tags TEXT,  -- JSON array of strings
             negative_prompts TEXT, -- JSON array of strings
+            scene_media_path TEXT,
+            scene_media_type TEXT,
+            scene_in REAL DEFAULT 0.0,
+            scene_out REAL DEFAULT 0.0,
+            sound_offset REAL DEFAULT 0.0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """)
@@ -89,6 +103,8 @@ def init_db():
             score REAL NOT NULL,
             rank INTEGER NOT NULL,
             status TEXT DEFAULT 'pending', -- 'pending', 'liked', 'confirmed', 'skipped'
+            audio_in REAL DEFAULT 0.0,
+            audio_out REAL DEFAULT 0.0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(slot_id, sound_id)
         );
@@ -105,6 +121,15 @@ def init_db():
             exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """)
+
+        # Schema Migrations for existing DBs
+        _ensure_column(c, "slots", "scene_media_path", "TEXT")
+        _ensure_column(c, "slots", "scene_media_type", "TEXT")
+        _ensure_column(c, "slots", "scene_in", "REAL DEFAULT 0.0")
+        _ensure_column(c, "slots", "scene_out", "REAL DEFAULT 0.0")
+        _ensure_column(c, "slots", "sound_offset", "REAL DEFAULT 0.0")
+        _ensure_column(c, "slot_candidates", "audio_in", "REAL DEFAULT 0.0")
+        _ensure_column(c, "slot_candidates", "audio_out", "REAL DEFAULT 0.0")
         
         # Performance Indices
         c.execute("CREATE INDEX IF NOT EXISTS idx_candidates_slot_rank ON slot_candidates(slot_id, rank);")
