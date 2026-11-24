@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SoundReels — Game SFX Explorer</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="style.css?v=1.4">
+  <link rel="stylesheet" href="style.css?v=1.5">
 </head>
 <body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans text-[14px]">
 
@@ -13,7 +13,7 @@
   <header class="h-14 border-b border-[#282828] bg-[#000000] px-6 flex items-center justify-between shrink-0 z-20">
     <div class="flex items-center space-x-3">
       <span class="text-2xl font-black tracking-tight text-[#1DB954]">🎧 SoundReels</span>
-      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v1.4</span>
+      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v1.5</span>
     </div>
     
     <!-- Search / Filter -->
@@ -242,7 +242,7 @@
               🎚️ 음량통일
             </button>
             <button id="btnMute" class="text-gray-200 hover:text-white text-base w-6 text-center leading-none">🔉</button>
-            <input id="volumeSlider" type="range" min="0" max="100" value="40" class="w-24 accent-[#1DB954] cursor-pointer h-1.5 bg-[#333] rounded-lg">
+            <input id="volumeSlider" type="range" min="0" max="100" value="40" class="w-24 accent-[#1DB954] cursor-pointer h-1.5 bg-[#333] rounded-lg focus:outline-none">
             <span id="volumeLabel" class="text-xs font-mono text-gray-300 w-9 text-right">40%</span>
           </div>
         </div>
@@ -250,7 +250,7 @@
         <!-- Time Slider -->
         <div class="flex items-center space-x-3 text-xs font-mono text-gray-300">
           <span id="timeCurrent">0:00</span>
-          <input id="timeSeek" type="range" min="0" max="100" value="0" class="flex-1 accent-[#1DB954] cursor-pointer h-1.5 bg-[#333] rounded-lg">
+          <input id="timeSeek" type="range" min="0" max="100" value="0" class="flex-1 accent-[#1DB954] cursor-pointer h-1.5 bg-[#333] rounded-lg focus:outline-none">
           <span id="timeDuration">0:00</span>
         </div>
 
@@ -322,8 +322,14 @@
 
       <!-- Confirmed / Export Status Footer -->
       <div class="p-3 border-t border-[#282828] bg-[#121212] text-[13px] space-y-2">
-        <div class="flex justify-between items-center text-gray-300">
-          <span>확정 완료율</span>
+        <div class="flex justify-between items-center text-gray-300 gap-2">
+          <div class="flex items-center gap-2">
+            <span>확정 완료율</span>
+            <button id="btnFilterConfirmed" title="완료(확정)된 항목만 모아보기 / 전체 보기"
+              class="px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838] text-[11px] font-semibold transition">
+              확정만 보기
+            </button>
+          </div>
           <span id="confirmedProgress" class="font-mono text-emerald-400 font-bold">0 / 30</span>
         </div>
         <div class="w-full bg-[#242424] h-2 rounded-full overflow-hidden">
@@ -378,6 +384,6 @@
   <!-- Hidden Native Audio Element -->
   <audio id="audioPlayer"></audio>
 
-  <script src="app.js?v=1.4"></script>
+  <script src="app.js?v=1.5"></script>
 </body>
 </html>

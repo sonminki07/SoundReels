@@ -96,6 +96,10 @@ class ConfirmRequest(BaseModel):
     sound_id: str
     unity_project_path: Optional[str] = None
 
+class UnconfirmRequest(BaseModel):
+    slot_id: str
+    sound_id: Optional[str] = None
+
 class BatchExportRequest(BaseModel):
     unity_project_path: str
 
@@ -640,6 +644,51 @@ def confirm_candidate(req: ConfirmRequest):
 
         conn.commit()
     return {"status": "ok", "variant_no": variant_no, "exported_path": exported_path}
+
+@app.post("/api/actions/unconfirm")
+def unconfirm_candidate(req: UnconfirmRequest):
+    """Cancels confirmation for a sound/slot and reverts slot status when no confirmed sounds remain."""
+    validate_id(req.slot_id, "slot_id")
+    if req.sound_id is not None:
+        validate_id(req.sound_id, "sound_id")
+
+    with get_db_context() as conn:
+        c = conn.cursor()
+        if req.sound_id:
+            c.execute(
+                "UPDATE slot_candidates SET status = 'pending' WHERE slot_id = ? AND sound_id = ? AND status = 'confirmed'",
+                (req.slot_id, req.sound_id),
+            )
+            c.execute(
+                "DELETE FROM confirmed_exports WHERE slot_id = ? AND sound_id = ?",
+                (req.slot_id, req.sound_id),
+            )
+        else:
+            c.execute(
+                "UPDATE slot_candidates SET status = 'pending' WHERE slot_id = ? AND status = 'confirmed'",
+                (req.slot_id,),
+            )
+            c.execute("DELETE FROM confirmed_exports WHERE slot_id = ?", (req.slot_id,))
+
+        c.execute(
+            "SELECT COUNT(*) as cnt FROM slot_candidates WHERE slot_id = ? AND status = 'confirmed'",
+            (req.slot_id,),
+        )
+        remaining_confirmed = c.fetchone()["cnt"]
+
+        if remaining_confirmed == 0:
+            c.execute(
+                "SELECT COUNT(*) as cnt FROM slot_candidates WHERE slot_id = ? AND status != 'skipped'",
+                (req.slot_id,),
+            )
+            has_cands = c.fetchone()["cnt"] > 0
+            new_slot_status = "has_candidates" if has_cands else "pending"
+            c.execute("UPDATE slots SET status = ? WHERE id = ?", (new_slot_status, req.slot_id))
+        else:
+            new_slot_status = "confirmed"
+
+        conn.commit()
+    return {"status": "ok", "slot_id": req.slot_id, "new_slot_status": new_slot_status}
 
 @app.post("/api/actions/reorder_similar")
 def reorder_similar(req: SimilarRequest):

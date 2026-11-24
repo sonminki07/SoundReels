@@ -4,6 +4,7 @@
 
 let allSlots = [];
 let currentCategory = "all";
+let showConfirmedOnly = false;
 let currentSlot = null;
 let currentCandidates = [];
 let currentIndex = -1;
@@ -1115,6 +1116,10 @@ async function loadSlots() {
     const res = await fetch(`/api/slots${qParam}`);
     const data = await res.json();
     allSlots = data.slots || [];
+    if (currentSlot) {
+      const refreshed = allSlots.find(s => s.id === currentSlot.id);
+      if (refreshed) currentSlot = refreshed;
+    }
     renderSlotsList();
     updateProgress();
 
@@ -1153,7 +1158,8 @@ async function selectSlot(slotId, autoPlay = true) {
     renderSlotsList();
 
     if (currentCandidates.length > 0) {
-      playCandidate(0, autoPlay);
+      const confirmedIdx = currentCandidates.findIndex(c => c.candidate_status === "confirmed");
+      playCandidate(confirmedIdx >= 0 ? confirmedIdx : 0, autoPlay);
     } else {
       audioPlayer.pause();
       audioPlayer.removeAttribute("src");
@@ -1199,13 +1205,14 @@ function playCandidate(index, autoPlay = true) {
     btnOpenSourceUrl.classList.remove("inline-flex");
   }
 
-  // Update Like button state
+  // Update Like & Confirm button state
   const btnLike = document.getElementById("btnLike");
   if (cand.candidate_status === "liked") {
     btnLike.classList.add("text-yellow-400", "border-yellow-500");
   } else {
     btnLike.classList.remove("text-yellow-400", "border-yellow-500");
   }
+  updateConfirmButtonUI(cand);
 
   document.querySelectorAll(".dock-btn").forEach(b => b.classList.remove("active", "border-[#1DB954]"));
 
@@ -1251,31 +1258,47 @@ function renderSlotsList() {
   container.innerHTML = "";
 
   const filtered = allSlots.filter(s => {
+    if (showConfirmedOnly && s.status !== "confirmed") return false;
     if (currentCategory !== "all" && s.category !== currentCategory) return false;
     const searchVal = document.getElementById("searchInput").value.toLowerCase();
     if (searchVal && !s.name.toLowerCase().includes(searchVal) && !s.memo.toLowerCase().includes(searchVal)) return false;
     return true;
   });
 
+  if (filtered.length === 0) {
+    container.innerHTML = `<div class="text-center text-gray-500 text-xs py-8">${showConfirmedOnly ? "확정 완료된 항목이 아직 없습니다." : "표시할 슬롯이 없습니다."}</div>`;
+    return;
+  }
+
   filtered.forEach(s => {
     const item = document.createElement("div");
-    item.className = `slot-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-[13px] ${currentSlot && currentSlot.id === s.id ? "active bg-[#282828]" : "bg-[#181818]"}`;
+    const isActive = currentSlot && currentSlot.id === s.id;
+    const isConfirmed = s.status === "confirmed";
+
+    let cardStyle = isActive ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#202020]";
+    if (isConfirmed) {
+      cardStyle = isActive
+        ? "active border-l-4 border-[#1DB954] bg-emerald-900/45 ring-1 ring-[#1DB954]"
+        : "border-l-4 border-[#1DB954] bg-emerald-950/35 hover:bg-emerald-950/55";
+    }
+    item.className = `slot-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-[13px] transition ${cardStyle}`;
 
     let statusBadge = "";
-    if (s.status === "confirmed") {
-      statusBadge = `<span class="bg-emerald-950 text-emerald-400 border border-emerald-800 text-xs px-2 py-0.5 rounded font-bold">확정</span>`;
+    if (isConfirmed) {
+      statusBadge = `<span class="bg-[#1DB954] text-black text-[11px] px-2.5 py-0.5 rounded-full font-black">✅ 확정</span>`;
     } else if (s.status === "on_hold") {
       statusBadge = `<span class="bg-[#242424] text-gray-500 text-xs px-2 py-0.5 rounded">보류</span>`;
     } else if (s.candidate_count > 0) {
-      statusBadge = `<span class="bg-[#242424] text-[#1DB954] text-xs px-2 py-0.5 rounded font-mono">${s.candidate_count} 후보</span>`;
+      statusBadge = `<span class="bg-[#242424] text-gray-300 text-xs px-2 py-0.5 rounded font-mono">${s.candidate_count} 후보</span>`;
     } else {
-      statusBadge = `<span class="bg-[#242424] text-gray-400 text-xs px-2 py-0.5 rounded">탐색 중</span>`;
+      statusBadge = `<span class="bg-[#242424] text-gray-500 text-xs px-2 py-0.5 rounded">탐색 중</span>`;
     }
 
     const sceneIcon = s.scene_media_url ? "🎬 " : "";
+    const titleColor = isConfirmed ? "text-emerald-300" : "text-gray-200";
     item.innerHTML = `
       <div class="truncate flex-1 pr-2 min-w-0">
-        <div class="font-bold text-gray-200 truncate">${sceneIcon}${s.name}</div>
+        <div class="font-bold ${titleColor} truncate">${isConfirmed ? "✅ " : ""}${sceneIcon}${s.name}</div>
         <div class="text-xs text-gray-400 truncate">${s.memo}</div>
       </div>
       <div class="shrink-0">${statusBadge}</div>
@@ -1293,10 +1316,15 @@ function renderCandidatesQueue() {
 
   currentCandidates.forEach((c, idx) => {
     const item = document.createElement("div");
-    item.className = `candidate-item p-3 rounded-lg flex items-center justify-between cursor-pointer text-[14px] ${idx === currentIndex ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#222]"}`;
+    const isConfirmed = c.candidate_status === "confirmed";
+    const activeCls = idx === currentIndex ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#222]";
+    const confirmedCls = isConfirmed ? "border-l-4 border-[#1DB954] bg-emerald-950/35" : "";
+    item.className = `candidate-item p-3 rounded-lg flex items-center justify-between cursor-pointer text-[14px] ${activeCls} ${confirmedCls}`;
 
     const likeIcon = c.candidate_status === "liked" ? "⭐ " : "";
-    const confirmedTag = c.candidate_status === "confirmed" ? " [확정]" : "";
+    const confirmedTag = isConfirmed
+      ? `<span class="ml-1.5 bg-[#1DB954] text-black text-[11px] px-2 py-0.5 rounded-full font-black">✅ 확정됨</span>`
+      : "";
     const srcUrl = c.original_source_url || c.catalog_url;
 
     const infoDiv = document.createElement("div");
@@ -1467,9 +1495,61 @@ async function triggerMutateCurrent() {
   }
 }
 
+function updateConfirmButtonUI(cand) {
+  const btn = document.getElementById("btnConfirm");
+  if (!btn) return;
+  const isConfirmed = cand && cand.candidate_status === "confirmed";
+  if (isConfirmed) {
+    btn.className = "flex items-center gap-1.5 px-6 py-2 rounded-full bg-amber-950/90 hover:bg-amber-900 text-amber-300 border border-amber-600 font-black text-[13px] transition shadow-xl active:scale-95";
+    btn.title = "이 후보의 확정을 취소합니다";
+    btn.innerHTML = `↩ 확정 취소`;
+  } else {
+    btn.className = "flex items-center gap-1.5 px-6 py-2 rounded-full bg-[#1DB954] hover:bg-[#1ed760] text-black font-black text-[13px] transition shadow-xl active:scale-95";
+    btn.title = "슬롯 확정 및 채택 (Enter)";
+    btn.innerHTML = `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg> 최종 채택 (Enter)`;
+  }
+}
+
+async function unconfirmCurrent() {
+  if (!currentSlot) return;
+  const cand = currentIndex >= 0 ? currentCandidates[currentIndex] : null;
+
+  try {
+    const res = await fetch("/api/actions/unconfirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        slot_id: currentSlot.id,
+        sound_id: cand && cand.candidate_status === "confirmed" ? cand.sound_id : null,
+      }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (cand && cand.candidate_status === "confirmed") {
+        cand.candidate_status = "pending";
+      } else {
+        currentCandidates.forEach(c => {
+          if (c.candidate_status === "confirmed") c.candidate_status = "pending";
+        });
+      }
+      currentSlot.status = data.new_slot_status || "has_candidates";
+      updateConfirmButtonUI(cand);
+      renderCandidatesQueue();
+      renderSlotsList();
+      updateProgress();
+    }
+  } catch (e) {
+    console.error("Unconfirm error:", e);
+  }
+}
+
 async function confirmCurrent() {
   if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
   const cand = currentCandidates[currentIndex];
+  if (cand.candidate_status === "confirmed") {
+    await unconfirmCurrent();
+    return;
+  }
   const unityPath = unityPathInput.value.trim();
 
   try {
@@ -1484,6 +1564,7 @@ async function confirmCurrent() {
     });
     cand.candidate_status = "confirmed";
     currentSlot.status = "confirmed";
+    updateConfirmButtonUI(cand);
 
     renderCandidatesQueue();
     renderSlotsList();
@@ -1567,9 +1648,23 @@ timeSeek.addEventListener("input", () => {
   audioPlayer.currentTime = (timeSeek.value / 100) * dur;
 });
 
-document.getElementById("btnPlay").addEventListener("click", () => {
+timeSeek.addEventListener("pointerup", () => timeSeek.blur());
+timeSeek.addEventListener("change", () => timeSeek.blur());
+if (volumeSlider) {
+  volumeSlider.addEventListener("pointerup", () => volumeSlider.blur());
+  volumeSlider.addEventListener("change", () => volumeSlider.blur());
+}
+
+function togglePlayback() {
   initAudioContext();
-  if (audioPlayer.paused) {
+  const isPlayingNow = !audioPlayer.paused || (loopMode === "sync" && sceneMediaType && sceneIsPlaying);
+  if (isPlayingNow) {
+    audioPlayer.pause();
+    if (loopMode === "sync" && sceneMediaType) {
+      sceneIsPlaying = false;
+      if (sceneMediaType === "video") sceneVideo.pause();
+    }
+  } else {
     if (loopMode === "sync" && sceneMediaType) {
       sceneCurrentTime = sceneIn;
       if (sceneMediaType === "video") {
@@ -1584,14 +1679,10 @@ document.getElementById("btnPlay").addEventListener("click", () => {
       }
       audioPlayer.play().catch(() => {});
     }
-  } else {
-    audioPlayer.pause();
-    if (loopMode === "sync" && sceneMediaType) {
-      sceneIsPlaying = false;
-      if (sceneMediaType === "video") sceneVideo.pause();
-    }
   }
-});
+}
+
+document.getElementById("btnPlay").addEventListener("click", togglePlayback);
 
 document.getElementById("btnNext").addEventListener("click", () => {
   if (currentIndex + 1 < currentCandidates.length) playCandidate(currentIndex + 1);
@@ -1605,6 +1696,22 @@ document.getElementById("btnLike").addEventListener("click", toggleLikeCurrent);
 document.getElementById("btnSimilar").addEventListener("click", triggerSimilarCurrent);
 document.getElementById("btnMutate").addEventListener("click", triggerMutateCurrent);
 document.getElementById("btnConfirm").addEventListener("click", confirmCurrent);
+
+const btnFilterConfirmed = document.getElementById("btnFilterConfirmed");
+if (btnFilterConfirmed) {
+  btnFilterConfirmed.addEventListener("click", () => {
+    showConfirmedOnly = !showConfirmedOnly;
+    if (showConfirmedOnly) {
+      btnFilterConfirmed.className = "px-2 py-0.5 rounded-full bg-[#1DB954] text-black border border-[#1DB954] text-[11px] font-black transition";
+      btnFilterConfirmed.textContent = "✅ 확정만 보기 중";
+      document.getElementById("tabSlotsBtn").click();
+    } else {
+      btnFilterConfirmed.className = "px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838] text-[11px] font-semibold transition";
+      btnFilterConfirmed.textContent = "확정만 보기";
+    }
+    renderSlotsList();
+  });
+}
 
 document.querySelectorAll(".cat-btn").forEach(btn => {
   btn.addEventListener("click", (e) => {
@@ -1867,8 +1974,27 @@ document.querySelectorAll(".dock-btn").forEach(btn => {
 // Keyboard Shortcuts (Reels + Scene Sync + Original Source 'O')
 // =========================================================================
 
+function isTextEditingTarget(target) {
+  if (!target) return false;
+  if (target.isContentEditable || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return true;
+  if (target.tagName === "INPUT") {
+    const t = (target.type || "").toLowerCase();
+    return !["range", "button", "checkbox", "radio", "submit", "reset"].includes(t);
+  }
+  return false;
+}
+
+// Prevent mouse clicks on buttons/range bars from trapping Spacebar focus
+document.addEventListener("mouseup", (e) => {
+  const active = document.activeElement;
+  if (!active || active === document.body) return;
+  if (active.tagName === "BUTTON" || (active.tagName === "INPUT" && active.type === "range")) {
+    active.blur();
+  }
+});
+
 window.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (isTextEditingTarget(e.target)) return;
 
   if (e.key === "ArrowDown" || e.key === "j" || e.key === "J") {
     e.preventDefault();
@@ -1878,7 +2004,11 @@ window.addEventListener("keydown", (e) => {
     if (currentIndex - 1 >= 0) playCandidate(currentIndex - 1);
   } else if (e.key === " " || e.code === "Space") {
     e.preventDefault();
-    document.getElementById("btnPlay").click();
+    e.stopPropagation();
+    if (document.activeElement && document.activeElement !== document.body && !isTextEditingTarget(document.activeElement)) {
+      document.activeElement.blur();
+    }
+    if (!e.repeat) togglePlayback();
   } else if (e.key === "s" || e.key === "S") {
     e.preventDefault();
     toggleLikeCurrent();
@@ -1903,7 +2033,14 @@ window.addEventListener("keydown", (e) => {
     const btn = document.querySelector(`.dock-btn[data-dock="${dockIdx}"]`);
     if (btn) btn.click();
   }
-});
+}, true);
+
+window.addEventListener("keyup", (e) => {
+  if ((e.key === " " || e.code === "Space") && !isTextEditingTarget(e.target)) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+}, true);
 
 // Initial load & poll
 loadSettingsFromServer().then(() => loadSlots());

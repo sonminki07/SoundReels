@@ -144,3 +144,24 @@
   - `verify_v14.py` 통과: index.html/app.js v1.4 토큰, `max_dur=2.0` 필터(30개 슬롯 / `sfx_dash_wind` 6개 후보 & `norm_gain`), `POST /api/slots/sfx_ui_tab_open/rescout` (`found_count=4`) 확인
   - `test_v12.py` 회귀 테스트 전체 통과 (`ALL BACKEND TESTS PASSED!`)
 ================================================================================
+
+8. v1.5 스페이스바 포커스/정지 버그 수정, 확정 항목 시각 구분 강화 및 확정 취소(Unconfirm) 지원
+--------------------------------------------------------------------------------
+- 요청 배경:
+  1) 탐색 바/볼륨 바 등 조작 후 스페이스바를 누르면 바가 선택/조작되고 재생 정지가 되지 않는 문제
+  2) 확정 완료율(1/30 등)에서 어떤 항목이 확정되었는지 한눈에 구분되지 않는 문제
+  3) 테스트 등으로 잘못 확정된 항목 취소 및 확정 취소 기능 지원
+- 구현 내역:
+  1) 스페이스바 재생/정지 및 바 포커스 방지 (index.html, app.js):
+     - `isTextEditingTarget()` 도입으로 `<input type="range">` 및 버튼 포커스 중에도 스페이스바를 가로채지 않고 캡처 단계(`keydown`/`keyup`, `true`)에서 즉시 `togglePlayback()` 실행
+     - `mouseup`/`pointerup`/`change` 후 슬라이더(`#timeSeek`, `#volumeSlider`) 및 버튼 자동 `.blur()`, `focus:outline-none` 적용
+  2) 확정 항목 시각 구분 & 필터 (index.html, app.js):
+     - 미확정 후보 배지는 중립 톤(`text-gray-300`), 확정 슬롯/후보는 에메랄드 강조 배경(`bg-emerald-950/35 border-l-4 border-[#1DB954]`) 및 `✅ 확정` / `✅ 확정됨` 배지로 차별화
+     - `#btnFilterConfirmed`(확정만 보기) 토글 버튼 추가 및 확정 슬롯 선택 시 확정 후보 우선 포커스
+  3) 확정 취소 API 및 기존 테스트 확정 데이터 초기화 (main.py, app.js):
+     - `POST /api/actions/unconfirm` 엔드포인트 및 `unconfirmCurrent()` 구현, 확정된 후보 선택 시 `#btnConfirm`을 `↩ 확정 취소` 토글로 전환
+     - 기존 테스트 실행으로 확정 상태로 남아있던 `sfx_target_hit` (`fs-161098`) 확정 취소 완료 (`0 / 30`)
+- 검증 결과 (QA 통과):
+  - 단독 데스크톱 앱(`pythonw.exe run_desktop.py`) 내장 서버에서 `POST /api/actions/unconfirm` 실행 후 전체 확정 수 `0 / 30` 확인
+  - confirm -> unconfirm 왕복 테스트 및 `test_v12.py` 회귀 테스트 통과
+================================================================================
