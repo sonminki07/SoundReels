@@ -9,6 +9,8 @@ let currentSlot = null;
 let currentCandidates = [];
 let currentIndex = -1;
 let similarAnchorSoundId = null;
+const similarRoundStatusBySlot = {}; // { [slotId]: { roundNo, foundNew, totalRanked, promptUsed, queriesUsed } }
+let similarClickTimer = null;
 const slotCompareDocks = {}; // { [slotId]: [sound|null, ...] }
 
 // Full-Screen Pre-Export Review Mode State
@@ -1513,6 +1515,7 @@ async function selectSlot(slotId, autoPlay = true) {
   if (!slot) return;
   currentSlot = slot;
   similarAnchorSoundId = null;
+  renderSimilarStatusBanner();
 
   currentSlotName.textContent = slot.name;
   currentSlotCategory.textContent = slot.category.toUpperCase();
@@ -1832,6 +1835,16 @@ function renderCandidatesQueue() {
       btnsDiv.appendChild(copyBtn);
     }
 
+    const delBtn = document.createElement("button");
+    delBtn.title = "이 후보 삭제 (목록에서 제외)";
+    delBtn.className = "text-gray-400 hover:text-red-400 px-1.5 py-0.5 text-xs bg-[#242424] hover:bg-red-950/60 rounded border border-[#333] hover:border-red-800/60 transition";
+    delBtn.textContent = "🗑️";
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      skipCandidateById(c.sound_id);
+    });
+    btnsDiv.appendChild(delBtn);
+
     const playBtn = document.createElement("button");
     playBtn.className = "text-gray-300 hover:text-white px-2 py-0.5 text-xs bg-[#242424] rounded";
     playBtn.textContent = "듣기";
@@ -1983,8 +1996,46 @@ function updateCompareDockUI() {
   });
 }
 
-async function triggerSimilarCurrent() {
+function renderSimilarStatusBanner() {
+  const banner = document.getElementById("similarStatusBanner");
+  if (!banner) return;
+  if (!currentSlot || !similarRoundStatusBySlot[currentSlot.id]) {
+    banner.classList.add("hidden");
+    banner.textContent = "";
+    return;
+  }
+  const st = similarRoundStatusBySlot[currentSlot.id];
+  const promptPart = st.promptUsed ? ` · 조건: "${st.promptUsed}"` : "";
+  const kwPart = Array.isArray(st.queriesUsed) && st.queriesUsed.length > 0
+    ? ` · 탐색 키워드: ${st.queriesUsed.join(", ")}`
+    : "";
+  banner.textContent = `🎯 유사 탐색 #${st.roundNo}회차 완료: +${st.foundNew}개 늘어남 (총 ${st.totalRanked}개)${promptPart}${kwPart}`;
+  banner.classList.remove("hidden");
+}
+
+function openSimilarPromptModal() {
   if (currentIndex < 0 || !currentCandidates[currentIndex] || !currentSlot) return;
+  const modal = document.getElementById("similarPromptModal");
+  const input = document.getElementById("similarPromptInput");
+  if (!modal) {
+    executeSimilarSearch("");
+    return;
+  }
+  modal.classList.remove("hidden");
+  if (input) {
+    input.value = "";
+    setTimeout(() => input.focus(), 20);
+  }
+}
+
+function closeSimilarPromptModal() {
+  const modal = document.getElementById("similarPromptModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function executeSimilarSearch(customPrompt = "") {
+  if (currentIndex < 0 || !currentCandidates[currentIndex] || !currentSlot) return;
+  closeSimilarPromptModal();
   const cand = currentCandidates[currentIndex];
   const btnSimilar = document.getElementById("btnSimilar");
   const prevLabel = btnSimilar ? btnSimilar.innerHTML : "";
@@ -1995,6 +2046,7 @@ async function triggerSimilarCurrent() {
   loadingSpinner.classList.remove("hidden");
 
   try {
+    const cleanPrompt = (customPrompt || "").trim();
     const res = await fetch("/api/actions/reorder_similar", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2002,11 +2054,21 @@ async function triggerSimilarCurrent() {
         slot_id: currentSlot.id,
         reference_sound_id: cand.sound_id,
         max_dur: maxSearchDuration > 0 ? maxSearchDuration : null,
+        custom_prompt: cleanPrompt || null,
       }),
     });
     const simData = await res.json();
     if (res.ok) {
       similarAnchorSoundId = cand.sound_id;
+      similarRoundStatusBySlot[currentSlot.id] = {
+        roundNo: simData.round_no || 1,
+        foundNew: simData.found_new || 0,
+        totalRanked: simData.total_ranked || 0,
+        promptUsed: simData.prompt_used || "",
+        queriesUsed: simData.queries_used || [],
+      };
+      renderSimilarStatusBanner();
+
       const qParam = maxSearchDuration > 0 ? `?max_dur=${encodeURIComponent(maxSearchDuration)}` : "";
       const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates${qParam}`);
       const cData = await cRes.json();
@@ -2028,6 +2090,123 @@ async function triggerSimilarCurrent() {
       btnSimilar.disabled = false;
       btnSimilar.innerHTML = prevLabel;
     }
+  }
+}
+
+async function triggerSimilarCurrent() {
+  openSimilarPromptModal();
+}
+
+function clearEmptySlotPlayerUI() {
+  audioPlayer.pause();
+  audioPlayer.removeAttribute("src");
+  waveformPeaks = [];
+  audioDuration = 0;
+  currentIndex = -1;
+  btnOpenSourceUrl.classList.add("hidden");
+  btnOpenSourceUrl.classList.remove("inline-flex");
+  if (btnCopySourceUrl) {
+    btnCopySourceUrl.classList.add("hidden");
+    btnCopySourceUrl.classList.remove("inline-flex");
+  }
+  currentSoundName.textContent = "남은 후보 사운드 없음";
+  currentSoundMeta.textContent = "'🔍 새로 찾기'로 후보를 다시 탐색할 수 있습니다";
+  queuePosition.textContent = "후보 0 / 0";
+  updateAudioTrimUI();
+  updateConfirmButtonUI(null);
+}
+
+async function skipCandidateById(soundId) {
+  if (!currentSlot || !soundId) return;
+  const idx = currentCandidates.findIndex(c => c.sound_id === soundId);
+  if (idx < 0) return;
+
+  try {
+    const res = await fetch("/api/actions/skip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slot_id: currentSlot.id, sound_id: soundId }),
+    });
+    if (!res.ok) return;
+
+    const wasPlayingRemoved = idx === currentIndex;
+    currentCandidates.splice(idx, 1);
+    removeFromCompareDock(soundId);
+    if (similarAnchorSoundId === soundId) similarAnchorSoundId = null;
+
+    await loadSlots();
+    const freshSlot = allSlots.find(s => s.id === currentSlot.id);
+    if (freshSlot) currentSlot = freshSlot;
+    activeSlotBadge.textContent = `${currentSlot.name} (${currentCandidates.length} 후보)`;
+
+    renderCandidatesQueue();
+    renderSlotsList();
+
+    if (currentCandidates.length === 0) {
+      clearEmptySlotPlayerUI();
+    } else if (wasPlayingRemoved) {
+      const nextIdx = Math.min(idx, currentCandidates.length - 1);
+      playCandidate(nextIdx, true);
+    } else if (idx < currentIndex) {
+      currentIndex -= 1;
+      queuePosition.textContent = `후보 ${currentIndex + 1} / ${currentCandidates.length}`;
+    } else {
+      queuePosition.textContent = `후보 ${currentIndex + 1} / ${currentCandidates.length}`;
+    }
+  } catch (e) {
+    console.error("Skip candidate error:", e);
+  }
+}
+
+async function pruneUnlikedCandidates() {
+  if (!currentSlot) return;
+  const removableCount = currentCandidates.filter(
+    c => c.candidate_status !== "liked" && c.candidate_status !== "confirmed"
+  ).length;
+  if (removableCount === 0) {
+    alert("정리할 미찜 후보가 없습니다. (찜⭐ / 확정✅ 후보는 보호됩니다)");
+    return;
+  }
+  if (!confirm(`[${currentSlot.name}] 슬롯에서 찜(⭐)/확정(✅)하지 않은 후보 ${removableCount}개를 일괄 삭제할까요?`)) {
+    return;
+  }
+
+  try {
+    loadingSpinner.classList.remove("hidden");
+    const res = await fetch(`/api/slots/${currentSlot.id}/candidates/prune_unliked`, {
+      method: "POST",
+    });
+    const data = await res.json();
+    if (res.ok) {
+      const activeSoundId = (currentIndex >= 0 && currentCandidates[currentIndex]) ? currentCandidates[currentIndex].sound_id : null;
+      const qParam = maxSearchDuration > 0 ? `?max_dur=${encodeURIComponent(maxSearchDuration)}` : "";
+      const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates${qParam}`);
+      const cData = await cRes.json();
+      currentCandidates = cData.candidates || [];
+      await loadSlots();
+      const freshSlot = allSlots.find(s => s.id === currentSlot.id);
+      if (freshSlot) currentSlot = freshSlot;
+      activeSlotBadge.textContent = `${currentSlot.name} (${currentCandidates.length} 후보)`;
+      renderCandidatesQueue();
+      renderSlotsList();
+
+      if (currentCandidates.length === 0) {
+        clearEmptySlotPlayerUI();
+      } else {
+        const keptIdx = activeSoundId ? currentCandidates.findIndex(c => c.sound_id === activeSoundId) : -1;
+        playCandidate(keptIdx >= 0 ? keptIdx : 0, false);
+      }
+
+      const banner = document.getElementById("similarStatusBanner");
+      if (banner) {
+        banner.textContent = `🧹 미찜 후보 ${data.removed_count || removableCount}개 정리 완료 (남은 후보 ${currentCandidates.length}개)`;
+        banner.classList.remove("hidden");
+      }
+    }
+  } catch (e) {
+    console.error("Prune unliked error:", e);
+  } finally {
+    loadingSpinner.classList.add("hidden");
   }
 }
 
@@ -2283,8 +2462,89 @@ document.getElementById("btnPrev").addEventListener("click", () => {
 });
 
 document.getElementById("btnLike").addEventListener("click", toggleLikeCurrent);
-document.getElementById("btnSimilar").addEventListener("click", triggerSimilarCurrent);
+
+const btnSimilarEl = document.getElementById("btnSimilar");
+if (btnSimilarEl) {
+  btnSimilarEl.addEventListener("click", (e) => {
+    if (e.detail >= 2) {
+      if (similarClickTimer) {
+        clearTimeout(similarClickTimer);
+        similarClickTimer = null;
+      }
+      return;
+    }
+    if (similarClickTimer) return;
+    similarClickTimer = setTimeout(() => {
+      similarClickTimer = null;
+      openSimilarPromptModal();
+    }, 240);
+  });
+  btnSimilarEl.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    if (similarClickTimer) {
+      clearTimeout(similarClickTimer);
+      similarClickTimer = null;
+    }
+    executeSimilarSearch("");
+  });
+}
+
 document.getElementById("btnMutate").addEventListener("click", triggerMutateCurrent);
+
+const btnDeleteCandidateEl = document.getElementById("btnDeleteCandidate");
+if (btnDeleteCandidateEl) {
+  btnDeleteCandidateEl.addEventListener("click", () => {
+    if (currentIndex >= 0 && currentCandidates[currentIndex]) {
+      skipCandidateById(currentCandidates[currentIndex].sound_id);
+    }
+  });
+}
+
+const btnPruneUnlikedEl = document.getElementById("btnPruneUnliked");
+if (btnPruneUnlikedEl) {
+  btnPruneUnlikedEl.addEventListener("click", pruneUnlikedCandidates);
+}
+
+const similarPromptModalEl = document.getElementById("similarPromptModal");
+const similarPromptInputEl = document.getElementById("similarPromptInput");
+if (document.getElementById("btnCloseSimilarModal")) {
+  document.getElementById("btnCloseSimilarModal").addEventListener("click", closeSimilarPromptModal);
+}
+if (document.getElementById("btnCancelSimilarModal")) {
+  document.getElementById("btnCancelSimilarModal").addEventListener("click", closeSimilarPromptModal);
+}
+if (document.getElementById("btnRunSimilarModal")) {
+  document.getElementById("btnRunSimilarModal").addEventListener("click", () => {
+    executeSimilarSearch(similarPromptInputEl ? similarPromptInputEl.value : "");
+  });
+}
+if (similarPromptModalEl) {
+  similarPromptModalEl.addEventListener("click", (e) => {
+    if (e.target === similarPromptModalEl) closeSimilarPromptModal();
+  });
+}
+document.querySelectorAll(".similar-chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const val = chip.dataset.chip || "";
+    if (!similarPromptInputEl) return;
+    const prev = similarPromptInputEl.value.trim();
+    similarPromptInputEl.value = prev ? `${prev}, ${val}` : val;
+    similarPromptInputEl.focus();
+  });
+});
+if (similarPromptInputEl) {
+  similarPromptInputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      executeSimilarSearch(similarPromptInputEl.value);
+    } else if ((e.code === keymapSettings.keys.similar) && !similarPromptInputEl.value.trim() && !e.repeat) {
+      // Pressing 'F' again while input is empty works like double-tap quick auto-search
+      e.preventDefault();
+      executeSimilarSearch("");
+    }
+  });
+}
+
 document.getElementById("btnConfirm").addEventListener("click", confirmCurrent);
 
 const btnFilterLiked = document.getElementById("btnFilterLiked");
@@ -3243,12 +3503,15 @@ window.addEventListener("keydown", (e) => {
   }
 
   if (e.key === "Escape") {
+    closeSimilarPromptModal();
     closeReceiptModal();
     closeSettingsModal();
     closeSourceInfoModal();
     return;
   }
 
+  const simModal = document.getElementById("similarPromptModal");
+  if (simModal && !simModal.classList.contains("hidden")) return;
   if (receiptModal && !receiptModal.classList.contains("hidden")) return;
   if (settingsModal && !settingsModal.classList.contains("hidden")) return;
   if (isTextEditingTarget(e.target)) return;
@@ -3312,6 +3575,11 @@ window.addEventListener("keydown", (e) => {
   } else if (code === k.mutate) {
     e.preventDefault();
     triggerMutateCurrent();
+  } else if (e.key === "Delete" || e.key === "Backspace") {
+    e.preventDefault();
+    if (currentIndex >= 0 && currentCandidates[currentIndex]) {
+      skipCandidateById(currentCandidates[currentIndex].sound_id);
+    }
   } else if (code === k.sourceLink) {
     e.preventDefault();
     const cand = currentIndex >= 0 ? currentCandidates[currentIndex] : null;

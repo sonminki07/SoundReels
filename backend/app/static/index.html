@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SoundReels — Game SFX Explorer</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="style.css?v=2.0">
+  <link rel="stylesheet" href="style.css?v=2.1">
 </head>
 <body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans text-[14px]">
 
@@ -13,7 +13,7 @@
   <header class="h-14 border-b border-[#282828] bg-[#000000] px-6 flex items-center justify-between shrink-0 z-20">
     <div class="flex items-center space-x-3">
       <span class="text-2xl font-black tracking-tight text-[#1DB954]">🎧 SoundReels</span>
-      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v2.0</span>
+      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v2.1</span>
     </div>
     
     <!-- Search / Filter -->
@@ -204,17 +204,20 @@
           </div>
           <span id="queuePosition" class="text-sm font-mono font-black text-white bg-[#262626] px-3.5 py-1.5 rounded-full border border-[#444] shadow shrink-0">후보 1 / 8</span>
         </div>
+        <div id="similarStatusBanner" class="hidden text-[11px] font-mono px-2.5 py-1 rounded bg-cyan-950/50 border border-cyan-800/60 text-cyan-200 truncate shrink-0">
+          <!-- Rendered after similar search: round & +N added -->
+        </div>
       </div>
 
       <!-- 2. 메뉴 (Quick Action Buttons Bar) -->
-      <div id="actionBar" class="flex items-center space-x-3 z-10 shrink-0">
+      <div id="actionBar" class="flex items-center space-x-2.5 z-10 shrink-0">
         <button id="btnLike" title="찜/중간저장 (S)"
           class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-yellow-400 border border-[#383838] text-[13px] font-bold transition shadow-lg active:scale-95">
           <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"></path></svg>
           찜 (S)
         </button>
 
-        <button id="btnSimilar" title="이 소리와 비슷한 것 (F)"
+        <button id="btnSimilar" title="1클릭: 프롬프트 입력 후 탐색 · 더블클릭: 즉시 자동 유사 탐색 (F)"
           class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-cyan-400 border border-[#383838] text-[13px] font-bold transition shadow-lg active:scale-95">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
           비슷한 것 (F)
@@ -223,6 +226,11 @@
         <button id="btnMutate" title="즉석 변형 (M)"
           class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-purple-400 border border-[#383838] text-[13px] font-bold transition shadow-lg active:scale-95">
           🎲 즉석 변형 (M)
+        </button>
+
+        <button id="btnDeleteCandidate" title="현재 후보 목록에서 삭제/제외 (Delete)"
+          class="flex items-center gap-1 px-3.5 py-2 rounded-full bg-[#242424] hover:bg-red-950 text-gray-300 hover:text-red-300 border border-[#383838] hover:border-red-800 text-[13px] font-bold transition shadow-lg active:scale-95">
+          🗑️ 삭제
         </button>
 
         <button id="btnConfirm" title="슬롯 확정 및 채택 (Enter)"
@@ -345,6 +353,10 @@
         <button id="btnRescoutSlot" title="설정한 최대 길이 이하로 온라인에서 후보를 새로 찾습니다"
           class="px-2.5 py-1 rounded bg-[#242424] hover:bg-[#1DB954] hover:text-black text-emerald-400 border border-[#383838] font-bold transition shrink-0">
           🔍 새로 찾기
+        </button>
+        <button id="btnPruneUnliked" title="이 슬롯에서 찜/확정하지 않은 나머지 후보들을 한 번에 정리(삭제)합니다"
+          class="px-2 py-1 rounded bg-[#242424] hover:bg-red-950 text-gray-300 hover:text-red-300 border border-[#383838] font-semibold transition shrink-0">
+          🧹 정리
         </button>
       </div>
 
@@ -518,6 +530,40 @@
     </div>
   </section>
 
+  <!-- Similar Sound Prompt Modal (1-Click on '비슷한 것', empty submit = Auto) -->
+  <div id="similarPromptModal" class="hidden fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-[#181818] border border-cyan-800/70 rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-[#2a2a2a] pb-3">
+        <div class="flex items-center gap-2">
+          <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-cyan-950 text-cyan-300 border border-cyan-700">🎯 유사 탐색</span>
+          <h3 class="font-bold text-white text-base">비슷한 소리 조건 입력 (선택)</h3>
+        </div>
+        <button id="btnCloseSimilarModal" class="text-gray-400 hover:text-white text-lg px-2 leading-none">✕</button>
+      </div>
+
+      <p class="text-xs text-gray-300 leading-relaxed">
+        원하는 차이점이나 뉘앙스를 적으면 <span class="text-cyan-300 font-semibold">현재 소리 음색 + 입력 조건</span>을 함께 반영해 찾습니다.<br>
+        <span class="text-gray-400">(아무것도 안 적고 Enter/찾기를 누르거나, 버튼을 빠르게 더블클릭하면 자동 유사 탐색합니다.)</span>
+      </p>
+
+      <input id="similarPromptInput" type="text" placeholder="예: 더 짧고 맑은 금속 딩 소리 / softer wooden knock..."
+        class="w-full bg-[#121212] border border-[#383838] rounded-xl px-3.5 py-2.5 text-sm text-white outline-none focus:border-cyan-400">
+
+      <div class="flex flex-wrap gap-1.5 text-[11px]">
+        <button type="button" data-chip="더 짧고 간결하게" class="similar-chip px-2.5 py-1 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">⚡ 더 짧게</button>
+        <button type="button" data-chip="더 맑고 밝은 고음" class="similar-chip px-2.5 py-1 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">✨ 더 맑고 밝게</button>
+        <button type="button" data-chip="더 묵직하고 강한 저음" class="similar-chip px-2.5 py-1 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🥁 더 묵직하게</button>
+        <button type="button" data-chip="더 부드럽고 잔잔하게" class="similar-chip px-2.5 py-1 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🍃 더 부드럽게</button>
+        <button type="button" data-chip="금속 질감" class="similar-chip px-2.5 py-1 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🔩 금속 질감</button>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-[#2a2a2a]">
+        <button id="btnCancelSimilarModal" class="px-4 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-gray-300 text-xs font-bold">취소</button>
+        <button id="btnRunSimilarModal" class="px-5 py-2 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-black text-xs font-black">🔍 찾기 (Enter)</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Receipt Viewer Modal (Displayed on preview & after Unity Export) -->
   <div id="receiptModal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
     <div class="bg-[#181818] border border-[#383838] rounded-2xl max-w-3xl w-full p-5 shadow-2xl space-y-3 max-h-[88vh] flex flex-col">
@@ -634,6 +680,6 @@
   <!-- Hidden Native Audio Element -->
   <audio id="audioPlayer"></audio>
 
-  <script src="app.js?v=2.0"></script>
+  <script src="app.js?v=2.1"></script>
 </body>
 </html>

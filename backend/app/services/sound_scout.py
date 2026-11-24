@@ -31,6 +31,66 @@ from backend.app.services.loudness import compute_norm_gain
 
 AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+SFX_KO_EN_MAP: Dict[str, str] = {
+    "짧": "short", "짧은": "short", "짧게": "short", "간결": "snappy", "순간": "instant",
+    "긴": "long", "길게": "long", "지속": "loop", "맑은": "clear", "맑고": "bright",
+    "밝은": "bright", "경쾌": "bright", "어두운": "dark", "무거운": "heavy", "묵직": "heavy",
+    "부드러운": "soft", "부드럽게": "soft", "약한": "gentle", "강한": "punchy", "세게": "hard",
+    "날카로운": "sharp", "날카롭게": "sharp", "크리스피": "crisp", "바삭": "crunch",
+    "금속": "metal", "쇠": "metallic", "철": "iron", "나무": "wood", "유리": "glass",
+    "물": "water", "액체": "liquid", "불": "fire", "바람": "wind", "공기": "air",
+    "전기": "electric", "스파크": "spark", "레이저": "laser", "마법": "magic",
+    "종": "bell", "벨": "bell", "딩": "ding", "차임": "chime", "알림": "notification",
+    "클릭": "click", "버튼": "button", "팝업": "popup", "문": "door", "발소리": "footstep",
+    "타격": "impact", "충격": "hit", "폭발": "explosion", "베기": "slash", "칼": "sword",
+    "대시": "whoosh", "휙": "swoosh", "기계": "mechanical", "엔진": "engine", "로봇": "robot",
+    "높은": "high pitch", "낮은": "low bass", "저음": "bass", "고음": "high",
+    "미래": "sci-fi", "공상": "scifi", "레트로": "retro", "8비트": "8bit", "몬스터": "monster",
+}
+
+SFX_SYNONYM_MAP: Dict[str, List[str]] = {
+    "bell": ["chime", "ding", "ping", "metallic", "gong", "ringtone"],
+    "doorbell": ["chime", "ding", "bell", "buzzer", "intercom"],
+    "chime": ["bell", "sparkle", "ding", "glockenspiel", "tone"],
+    "wind": ["whoosh", "air", "breeze", "gust", "swoosh"],
+    "whoosh": ["swoosh", "swipe", "air", "wind", "flyby"],
+    "click": ["tap", "switch", "button", "pop", "tick"],
+    "button": ["click", "switch", "ui", "beep", "snap"],
+    "crunch": ["crisp", "crackle", "bite", "chips", "biscuit"],
+    "impact": ["hit", "thud", "punch", "slam", "crash"],
+    "hit": ["impact", "strike", "smack", "knock", "thump"],
+    "door": ["latch", "slam", "creak", "hinge", "shut"],
+    "metal": ["clang", "clank", "steel", "metallic", "anvil"],
+    "wood": ["knock", "crate", "plank", "tap", "creak"],
+    "water": ["splash", "bubble", "drip", "liquid", "pour"],
+    "spray": ["hiss", "mist", "aerosol", "steam", "puff"],
+    "fire": ["flame", "burn", "crackle", "torch", "whoosh"],
+    "electric": ["zap", "spark", "static", "shock", "buzz"],
+    "laser": ["sci-fi", "zap", "blaster", "beam", "synth"],
+    "explosion": ["boom", "blast", "detonation", "debris", "thunder"],
+    "magic": ["sparkle", "spell", "cast", "shimmer", "chime"],
+    "footstep": ["walk", "step", "shoe", "run", "boots"],
+    "mechanical": ["gear", "servo", "motor", "ratchet", "machinery"],
+}
+
+
+def _extract_english_prompt_terms(prompt_text: str) -> List[str]:
+    """Converts Korean/English user similarity prompt into clean English SFX search & CLAP tokens."""
+    raw = (prompt_text or "").strip().lower()
+    if not raw:
+        return []
+    terms: List[str] = []
+    # Match Korean keywords cleanly by substring
+    for ko, en in SFX_KO_EN_MAP.items():
+        if ko in raw and en not in terms:
+            terms.append(en)
+    # Keep ASCII English words
+    for token in raw.replace(",", " ").replace(".", " ").split():
+        ascii_only = "".join(ch for ch in token if ch.isascii() and (ch.isalnum() or ch == "-"))
+        if len(ascii_only) >= 2 and not ascii_only.isdigit() and ascii_only not in terms:
+            terms.append(ascii_only)
+    return terms
+
 
 class SoundScout:
     def __init__(self, device: str = "cuda"):
@@ -40,6 +100,7 @@ class SoundScout:
         self.processor = ClapProcessor.from_pretrained(self.model_id)
         self.model = ClapModel.from_pretrained(self.model_id, use_safetensors=True).to(self.device).eval()
         self._audio_emb_cache: Dict[str, torch.Tensor] = {}
+        self._similar_history: Dict[str, Dict[str, Any]] = {}
         print("[SoundScout] CLAP Model ready.")
 
     def search_lotsofsounds(self, query: str, limit: int = 12) -> List[Dict[str, Any]]:
@@ -300,25 +361,39 @@ class SoundScout:
         slot_id: str,
         reference_sound_id: str,
         max_duration: Optional[float] = None,
+        custom_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Finds & ranks acoustically similar sounds using CLAP audio-to-audio similarity + tag search."""
+        """Finds & ranks acoustically similar sounds with tag/synonym rotation and optional user prompt."""
+        hist_key = f"{slot_id}::{reference_sound_id}"
+        hist = self._similar_history.setdefault(hist_key, {"round_no": 0, "tried_queries": set()})
+        hist["round_no"] += 1
+        round_no = hist["round_no"]
+        tried_queries = hist["tried_queries"]
+
         with get_db_context() as conn:
             c = conn.cursor()
             c.execute("SELECT * FROM sounds WHERE id = ?", (reference_sound_id,))
             ref_row = c.fetchone()
             if not ref_row:
-                return {"found_new": 0, "total_ranked": 0, "top_similar_index": 0, "queries_used": []}
+                return {"found_new": 0, "total_ranked": 0, "top_similar_index": 0, "queries_used": [], "round_no": round_no}
             ref_snd = dict(ref_row)
+
+            c.execute("SELECT search_tags FROM slots WHERE id = ?", (slot_id,))
+            slot_row = c.fetchone()
+            slot_tags = json.loads((slot_row["search_tags"] if slot_row else None) or "[]")
 
             c.execute("""
             SELECT sc.id as cand_row_id, sc.sound_id, sc.status, snd.file_path, snd.name, snd.duration
             FROM slot_candidates sc
             JOIN sounds snd ON sc.sound_id = snd.id
-            WHERE sc.slot_id = ? AND sc.status != 'skipped'
+            WHERE sc.slot_id = ?
             """, (slot_id,))
-            existing_rows = [dict(r) for r in c.fetchall()]
+            all_slot_rows = [dict(r) for r in c.fetchall()]
 
-        # 1. Reference CLAP Audio Embedding
+        skipped_ids = {r["sound_id"] for r in all_slot_rows if r["status"] == "skipped"}
+        existing_rows = [r for r in all_slot_rows if r["status"] != "skipped"]
+
+        # 1. Build Target Embedding (Audio-to-Audio, or Hybrid Audio + User Prompt Text)
         ref_emb = None
         if ref_snd.get("file_path") and Path(ref_snd["file_path"]).exists():
             ref_emb = self.compute_audio_embedding(ref_snd["file_path"])
@@ -326,28 +401,67 @@ class SoundScout:
         if ref_emb is None:
             ref_emb = self.compute_text_embedding([ref_snd.get("name", "")] + ref_tags, fallback_text="game sound effect")
 
-        # 2. Extract descriptive search queries from the reference sound's tags & title
+        prompt_terms = _extract_english_prompt_terms(custom_prompt or "")
+        if prompt_terms:
+            prompt_phrase = " ".join(prompt_terms)
+            prompt_emb = self.compute_text_embedding([prompt_phrase, f"{prompt_phrase} sound effect"], fallback_text=prompt_phrase)
+            target_emb = 0.55 * ref_emb + 0.45 * prompt_emb
+            target_emb = target_emb / target_emb.norm(dim=-1, keepdim=True)
+        else:
+            target_emb = ref_emb
+
+        # 2. Build diversified query pool & rotate untried queries across rounds
         stop_words = {"sound", "audio", "sfx", "effect", "effects", "tags", "tag", "cc0", "freesound", "loop", "file", "noise"}
-        queries: List[str] = []
+        candidate_pool: List[str] = []
+
+        # Priority A: User prompt keywords (combined & individual)
+        if prompt_terms:
+            if len(prompt_terms) >= 2:
+                candidate_pool.append(" ".join(prompt_terms[:2]))
+            for pt in prompt_terms[:4]:
+                if pt not in candidate_pool:
+                    candidate_pool.append(pt)
+
+        # Priority B: Reference sound tags & title keywords
         for t in ref_tags:
             clean = str(t).strip().lower().replace("-", " ")
-            if len(clean) >= 3 and not clean.isdigit() and clean not in stop_words and clean not in queries:
-                queries.append(clean)
-            if len(queries) >= 2:
-                break
+            if len(clean) >= 3 and not clean.isdigit() and clean not in stop_words and clean not in candidate_pool:
+                candidate_pool.append(clean)
         if ref_snd.get("name"):
             name_tokens = [w.strip().lower() for w in str(ref_snd["name"]).replace("-", " ").split() if len(w.strip()) >= 3]
-            filtered_name = " ".join([w for w in name_tokens if w not in stop_words and not w.isdigit()][:3])
-            if filtered_name and filtered_name not in queries:
-                queries.insert(0, filtered_name)
-        queries = queries[:2]
+            filtered_name = " ".join([w for w in name_tokens if w not in stop_words and not w.isdigit()][:2])
+            if filtered_name and filtered_name not in candidate_pool:
+                candidate_pool.append(filtered_name)
 
-        # 3. Search LotsOfSounds online for fresh acoustically similar sounds
-        existing_ids = {r["sound_id"] for r in existing_rows}
-        seen_ids = set(existing_ids) | {reference_sound_id}
+        # Priority C: Synonym expansions so repeated clicks continue discovering fresh sounds
+        for base_word in list(candidate_pool):
+            for tok in base_word.split():
+                for syn in SFX_SYNONYM_MAP.get(tok, []):
+                    if syn not in candidate_pool:
+                        candidate_pool.append(syn)
+
+        # Priority D: Slot tags fallback
+        for st in slot_tags:
+            clean_st = str(st).strip().lower()
+            if clean_st and clean_st not in candidate_pool:
+                candidate_pool.append(clean_st)
+
+        untried = [q for q in candidate_pool if q not in tried_queries]
+        if not untried:
+            # Reset tried rotation when all synonyms cycled once, keeping prompt terms first
+            tried_queries.clear()
+            untried = candidate_pool
+
+        queries = untried[:3]
+        for q in queries:
+            tried_queries.add(q)
+
+        # 3. Search LotsOfSounds online (full 12 sample page per untried query)
+        existing_ids = {r["sound_id"] for r in all_slot_rows}
+        seen_ids = set(existing_ids) | skipped_ids | {reference_sound_id}
         new_raw_items = []
         for q in queries:
-            for item in self.search_lotsofsounds(q, limit=6):
+            for item in self.search_lotsofsounds(q, limit=12):
                 sid = item.get("id")
                 if not sid or sid in seen_ids:
                     continue
@@ -358,7 +472,7 @@ class SoundScout:
             time.sleep(0.03)
 
         downloaded_new = []
-        targets = new_raw_items[:5]
+        targets = new_raw_items[:6]
         if targets:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=4) as pool:
@@ -366,15 +480,40 @@ class SoundScout:
                     if dl:
                         downloaded_new.append(dl)
 
-        # 4. Score BOTH newly downloaded sounds and existing slot sounds by audio-to-audio CLAP similarity
+        # 4. Score newly downloaded sounds + check local library cross-matches if online yields < 3
         scored_new = []
         for snd in downloaded_new:
             a_emb = self.compute_audio_embedding(snd["file_path"])
             if a_emb is None:
                 continue
-            sim = float((a_emb @ ref_emb.T).item())
+            sim = float((a_emb @ target_emb.T).item())
             scored_new.append({"sound": snd, "score": sim})
 
+        if len(scored_new) < 3:
+            with get_db_context() as conn:
+                c = conn.cursor()
+                c.execute("SELECT * FROM sounds")
+                pool_rows = [dict(r) for r in c.fetchall()]
+            local_matches = []
+            for p_row in pool_rows:
+                pid = p_row["id"]
+                if pid in seen_ids:
+                    continue
+                if max_duration and max_duration > 0 and (p_row.get("duration") or 0.0) > max_duration:
+                    continue
+                fp = p_row.get("file_path")
+                if not fp or not Path(fp).exists():
+                    continue
+                a_emb = self.compute_audio_embedding(fp)
+                if a_emb is None:
+                    continue
+                sim = float((a_emb @ target_emb.T).item())
+                if sim >= 0.45:
+                    local_matches.append({"sound": p_row, "score": sim, "from_local_pool": True})
+            local_matches.sort(key=lambda x: x["score"], reverse=True)
+            scored_new.extend(local_matches[: max(1, 4 - len(scored_new))])
+
+        # Re-score existing active candidates in this slot against target_emb
         existing_scores: List[Dict[str, Any]] = []
         for ex in existing_rows:
             if ex["sound_id"] == reference_sound_id:
@@ -384,36 +523,37 @@ class SoundScout:
             if fp and Path(fp).exists():
                 a_emb = self.compute_audio_embedding(fp)
                 if a_emb is not None:
-                    sim = float((a_emb @ ref_emb.T).item())
+                    sim = float((a_emb @ target_emb.T).item())
             existing_scores.append({"sound_id": ex["sound_id"], "score": sim})
 
-        # 5. Persist newly found sounds & update acoustic similarity ordering cleanly
+        # 5. Persist newly found sounds & update acoustic/prompt similarity ordering cleanly
         with get_db_context() as conn:
             c = conn.cursor()
             for entry in scored_new:
                 snd = entry["sound"]
-                c.execute("""
-                INSERT INTO sounds (id, source, source_id, name, file_path, duration, license_type, author, source_url, tags, sha256, norm_gain)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    file_path=excluded.file_path,
-                    duration=excluded.duration,
-                    sha256=excluded.sha256,
-                    norm_gain=excluded.norm_gain;
-                """, (
-                    snd["id"],
-                    snd["source"],
-                    snd["source_id"],
-                    snd["name"],
-                    snd["file_path"],
-                    snd["duration"],
-                    snd["license_type"],
-                    snd["author"],
-                    snd["source_url"],
-                    json.dumps(snd["tags"], ensure_ascii=False),
-                    snd["sha256"],
-                    snd["norm_gain"],
-                ))
+                if not entry.get("from_local_pool"):
+                    c.execute("""
+                    INSERT INTO sounds (id, source, source_id, name, file_path, duration, license_type, author, source_url, tags, sha256, norm_gain)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        file_path=excluded.file_path,
+                        duration=excluded.duration,
+                        sha256=excluded.sha256,
+                        norm_gain=excluded.norm_gain;
+                    """, (
+                        snd["id"],
+                        snd["source"],
+                        snd["source_id"],
+                        snd["name"],
+                        snd["file_path"],
+                        snd["duration"],
+                        snd["license_type"],
+                        snd["author"],
+                        snd["source_url"],
+                        json.dumps(snd["tags"], ensure_ascii=False) if isinstance(snd.get("tags"), list) else (snd.get("tags") or "[]"),
+                        snd["sha256"],
+                        snd["norm_gain"],
+                    ))
                 c.execute("""
                 INSERT INTO slot_candidates (slot_id, sound_id, score, rank, status)
                 VALUES (?, ?, ?, 999, 'pending')
@@ -426,7 +566,6 @@ class SoundScout:
                     (ex["score"], slot_id, ex["sound_id"]),
                 )
 
-            # Set rank 1 = reference anchor, ranks 2..N sorted by acoustic similarity DESC
             c.execute("UPDATE slot_candidates SET rank = 1 WHERE slot_id = ? AND sound_id = ?", (slot_id, reference_sound_id))
             c.execute("""
             SELECT id, sound_id FROM slot_candidates
@@ -441,10 +580,12 @@ class SoundScout:
 
         total_ranked = 1 + len(other_rows)
         return {
+            "round_no": round_no,
             "found_new": len(scored_new),
             "total_ranked": total_ranked,
             "top_similar_index": 1 if total_ranked > 1 else 0,
             "queries_used": queries,
+            "prompt_used": (custom_prompt or "").strip(),
         }
 
     def scout_all_slots(self):

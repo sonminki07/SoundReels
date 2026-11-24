@@ -145,6 +145,7 @@ class SimilarRequest(BaseModel):
     slot_id: str
     reference_sound_id: str
     max_dur: Optional[float] = Field(default=None, ge=0.0)
+    custom_prompt: Optional[str] = None
 
 class MutateRequest(BaseModel):
     slot_id: str
@@ -259,7 +260,7 @@ def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
         if max_dur and max_dur > 0:
             c.execute("""
             SELECT s.*, 
-                   COUNT(CASE WHEN snd.duration <= ? THEN sc.id END) as candidate_count,
+                   COUNT(CASE WHEN sc.status != 'skipped' AND snd.duration <= ? THEN sc.id END) as candidate_count,
                    SUM(CASE WHEN sc.status = 'liked' AND snd.duration <= ? THEN 1 ELSE 0 END) as liked_count,
                    SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count
             FROM slots s
@@ -271,7 +272,7 @@ def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
         else:
             c.execute("""
             SELECT s.*, 
-                   COUNT(sc.id) as candidate_count,
+                   COUNT(CASE WHEN sc.status != 'skipped' THEN sc.id END) as candidate_count,
                    SUM(CASE WHEN sc.status = 'liked' THEN 1 ELSE 0 END) as liked_count,
                    SUM(CASE WHEN sc.status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_count
             FROM slots s
@@ -334,7 +335,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
             JOIN sounds snd ON sc.sound_id = snd.id
-            WHERE sc.slot_id = ? AND snd.duration <= ?
+            WHERE sc.slot_id = ? AND sc.status != 'skipped' AND snd.duration <= ?
             ORDER BY sc.rank ASC
             """, (slot_id, max_dur))
         else:
@@ -346,7 +347,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
             JOIN sounds snd ON sc.sound_id = snd.id
-            WHERE sc.slot_id = ?
+            WHERE sc.slot_id = ? AND sc.status != 'skipped'
             ORDER BY sc.rank ASC
             """, (slot_id,))
         candidates = []
@@ -768,11 +769,51 @@ def skip_candidate(req: ActionRequest):
     validate_id(req.sound_id, "sound_id")
     with get_db_context() as conn:
         c = conn.cursor()
-        c.execute("""
-        UPDATE slot_candidates SET status = 'skipped' WHERE slot_id = ? AND sound_id = ?
-        """, (req.slot_id, req.sound_id))
+        c.execute(
+            "UPDATE slot_candidates SET status = 'skipped' WHERE slot_id = ? AND sound_id = ?",
+            (req.slot_id, req.sound_id),
+        )
+        c.execute(
+            "DELETE FROM confirmed_exports WHERE slot_id = ? AND sound_id = ?",
+            (req.slot_id, req.sound_id),
+        )
+        c.execute(
+            "SELECT COUNT(*) as cnt FROM slot_candidates WHERE slot_id = ? AND status = 'confirmed'",
+            (req.slot_id,),
+        )
+        if c.fetchone()["cnt"] == 0:
+            c.execute(
+                "SELECT COUNT(*) as cnt FROM slot_candidates WHERE slot_id = ? AND status != 'skipped'",
+                (req.slot_id,),
+            )
+            has_cands = c.fetchone()["cnt"] > 0
+            c.execute(
+                "UPDATE slots SET status = ?, review_passed = 0 WHERE id = ? AND status = 'confirmed'",
+                ("has_candidates" if has_cands else "pending", req.slot_id),
+            )
         conn.commit()
-    return {"status": "ok", "action": "skipped"}
+    return {"status": "ok", "action": "skipped", "sound_id": req.sound_id}
+
+@app.post("/api/slots/{slot_id}/candidates/prune_unliked")
+def prune_unliked_candidates(slot_id: str):
+    """Deletes (skips) all pending candidates in a slot while preserving liked & confirmed sounds."""
+    validate_id(slot_id, "slot_id")
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE slot_candidates SET status = 'skipped' WHERE slot_id = ? AND status = 'pending'",
+            (slot_id,),
+        )
+        removed_count = c.rowcount
+        c.execute(
+            "SELECT COUNT(*) as cnt FROM slot_candidates WHERE slot_id = ? AND status != 'skipped'",
+            (slot_id,),
+        )
+        remaining_count = c.fetchone()["cnt"]
+        if remaining_count == 0:
+            c.execute("UPDATE slots SET status = 'pending', review_passed = 0 WHERE id = ?", (slot_id,))
+        conn.commit()
+    return {"status": "ok", "slot_id": slot_id, "removed_count": removed_count, "remaining_count": remaining_count}
 
 @app.post("/api/actions/confirm")
 def confirm_candidate(req: ConfirmRequest):
@@ -914,7 +955,7 @@ def set_slot_review_pass(slot_id: str, req: ReviewPassRequest):
 
 @app.post("/api/actions/reorder_similar")
 def reorder_similar(req: SimilarRequest):
-    """Finds new similar sounds by tags & ranks all candidates via CLAP audio-to-audio similarity."""
+    """Finds new similar sounds (rotated tags + optional user prompt) & ranks via CLAP similarity."""
     validate_id(req.slot_id, "slot_id")
     validate_id(req.reference_sound_id, "reference_sound_id")
     max_d = req.max_dur if (req.max_dur and req.max_dur > 0) else None
@@ -923,15 +964,18 @@ def reorder_similar(req: SimilarRequest):
         slot_id=req.slot_id,
         reference_sound_id=req.reference_sound_id,
         max_duration=max_d,
+        custom_prompt=req.custom_prompt,
     )
     return {
         "status": "ok",
         "reference_sound_id": req.reference_sound_id,
+        "round_no": result.get("round_no", 1),
         "found_new": result["found_new"],
         "total_ranked": result["total_ranked"],
         "top_similar_index": result["top_similar_index"],
         "queries_used": result["queries_used"],
-        "message": f"CLAP 오디오 유사도 기준 정렬 완료 (새 후보 {result['found_new']}개 추가)",
+        "prompt_used": result.get("prompt_used", ""),
+        "message": f"유사 탐색 #{result.get('round_no', 1)}회차 완료 (+{result['found_new']}개 추가, 총 {result['total_ranked']}개)",
     }
 
 @app.post("/api/actions/mutate")

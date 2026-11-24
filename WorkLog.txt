@@ -281,3 +281,26 @@
   1) `app.js` (`waveformDecodeSeq`): 비동기 `fetch`·`decodeAudioData` 전후에 시퀀스 번호 및 현재 `sound_id` 일치 검증을 추가하고 `onloadedmetadata` 시간 동기화 보강
   2) `sound_scout.py` (`download_sound`) & DB 일괄 보정: `soundfile.info(local_file).duration`으로 실제 MP3 길이를 측정해 DB `sounds.duration` 동기화
 ================================================================================
+
+16. v2.1 후보 개별/일괄 삭제, 다회차 키워드 순환 유사 탐색, 한국어/영문 프롬프트 탐색 및 UI 반영
+--------------------------------------------------------------------------------
+- 배경 및 원인:
+  1) LotsOfSounds 무료 샘플 API가 키워드당 `limit=12, totalPages=1`로 고정되어, 기존 고정 2개 키워드 재요청 방식에서는 1~2회 이후 새 후보가 추가되지 않던 한계 발생
+  2) 후보 누적 시 개별/일괄 정리 기능이 없었고 `skipped` 상태가 `/api/slots` 및 `/candidates` 쿼리에서 제외되지 않던 문제 해결 필요
+  3) `비슷한 것` 동작 시 1클릭 조건 입력과 더블클릭 즉시 자동 탐색 분리 및 탐색 회차/증가 개수 시각화 필요
+- 구현 내역:
+  1) 후보 개별 삭제 & 미찜 일괄 정리 (`main.py`, `index.html`, `app.js`):
+     - `GET /api/slots` & `GET /api/slots/{slot_id}/candidates`에서 `sc.status != 'skipped'` 필터 적용
+     - `POST /api/actions/skip` 보강(확정 내보내기 레코드 정리 및 슬롯 상태 복원 포함) 및 `POST /api/slots/{slot_id}/candidates/prune_unliked` 신설
+     - 대기열 카드 `🗑️` 버튼, 액션 바 `#btnDeleteCandidate`(`Delete`/`Backspace`), 우측 패널 `#btnPruneUnliked`(`🧹 정리`) 추가
+  2) 다회차 유사 탐색 + 프롬프트 블렌딩 (`sound_scout.py`, `main.py`):
+     - `SFX_KO_EN_MAP`, `SFX_SYNONYM_MAP`, `_extract_english_prompt_terms()`, `self._similar_history`로 `(slot_id, reference_sound_id)`별 회차/시도 키워드 추적 및 미시도 동의어 순환 + 로컬 라이브러리 CLAP 보충
+     - `custom_prompt` 입력 시 `0.55 * ref_emb + 0.45 * prompt_emb` CLAP 가중 블렌딩 적용
+  3) 1클릭 프롬프트 모달 vs 더블클릭 자동 탐색 (`index.html`, `app.js`):
+     - `#btnSimilar` 1클릭(240ms 디바운스) / `F` 키 시 `#similarPromptModal` 오픈(빈 값 `Enter`/`F` 시 자동 탐색), 더블클릭 시 즉시 `executeSimilarSearch("")` 실행
+     - `#similarStatusBanner`에 `🎯 유사 탐색 #N회차 완료: +X개 늘어남 (총 Y개)` 및 탐색 키워드/입력 조건 표시
+- 검증 결과 (QA 통과):
+  - `node --check backend/app/static/app.js` 구문 오류 0건
+  - `verify_v21.py` 통과: 다회차 유사 탐색 키워드 순환 및 한국어 프롬프트(`더 짧고 맑은 금속 딩 소리`) 반영(`+6`개씩 누적), 개별 스킵(`20 -> 19`), 미찜 일괄 정리(`18`개 삭제 후 찜 1개 보존), `check_update` 확인 및 DB 원복 완료
+  - `test_v12.py` 회귀 테스트 전체 통과
+================================================================================
