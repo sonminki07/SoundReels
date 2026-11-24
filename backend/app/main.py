@@ -85,19 +85,40 @@ def validate_id(identifier: str, name: str = "id"):
         raise HTTPException(status_code=400, detail=f"Invalid {name} format. Allowed: alphanumeric, _, -")
 
 def resolve_source_urls(sound_dict: Dict[str, Any]) -> Dict[str, Optional[str]]:
-    """Resolves original Freesound author URL and LotsOfSounds catalog URL."""
+    """Resolves original Freesound author URL, LotsOfSounds catalog URL, and source_kind."""
+    src = str(sound_dict.get("source") or "").strip().lower()
     sid = str(sound_dict.get("source_id") or sound_dict.get("id") or "")
-    raw_url = sound_dict.get("source_url") or ""
+    full_id = str(sound_dict.get("sound_id") or sound_dict.get("id") or "")
+    raw_url = str(sound_dict.get("source_url") or "")
+
     m = FS_ID_REGEX.match(sid)
+    if raw_url.startswith("local://") or (src == "procedural" and not m):
+        return {
+            "source_kind": "ai_generated",
+            "original_source_url": None,
+            "catalog_url": None,
+        }
+
+    is_mutated = src == "procedural" or full_id.endswith("_mutated")
+    source_kind = "ai_mutated" if is_mutated else "external"
     if m:
         fs_num = m.group(1)
         return {
+            "source_kind": source_kind,
             "original_source_url": f"https://freesound.org/s/{fs_num}/",
             "catalog_url": f"https://www.lotsofsounds.com/sounds/fs-{fs_num}",
         }
     if raw_url.startswith("https://"):
-        return {"original_source_url": raw_url, "catalog_url": raw_url}
-    return {"original_source_url": None, "catalog_url": None}
+        return {
+            "source_kind": source_kind,
+            "original_source_url": raw_url,
+            "catalog_url": raw_url,
+        }
+    return {
+        "source_kind": "ai_generated",
+        "original_source_url": None,
+        "catalog_url": None,
+    }
 
 # Pydantic Request Models
 class ActionRequest(BaseModel):
@@ -262,7 +283,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             c.execute("""
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
-                   snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source_url, snd.source_id, snd.tags, snd.sha256,
+                   snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
             JOIN sounds snd ON sc.sound_id = snd.id
@@ -273,7 +294,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             c.execute("""
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
-                   snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source_url, snd.source_id, snd.tags, snd.sha256,
+                   snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
             JOIN sounds snd ON sc.sound_id = snd.id
@@ -286,6 +307,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             item["tags"] = json.loads(item.get("tags") or "[]")
             item["audio_url"] = f"/api/sounds/{item['sound_id']}/audio"
             urls = resolve_source_urls(item)
+            item["source_kind"] = urls["source_kind"]
             item["original_source_url"] = urls["original_source_url"]
             item["catalog_url"] = urls["catalog_url"]
             candidates.append(item)
@@ -644,11 +666,21 @@ def open_external_url(req: OpenExternalRequest):
         raise HTTPException(status_code=400, detail="URL host is not in the allowed whitelist")
     try:
         if os.name == "nt":
-            os.startfile(req.url)
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", req.url],
+                shell=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         else:
             webbrowser.open(req.url, new=2)
     except Exception:
-        webbrowser.open(req.url, new=2)
+        try:
+            if os.name == "nt":
+                os.startfile(req.url)
+            else:
+                webbrowser.open(req.url, new=2)
+        except Exception:
+            webbrowser.open(req.url, new=2)
     return {"status": "ok", "opened": req.url}
 
 # --- Existing Actions ---

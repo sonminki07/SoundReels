@@ -186,3 +186,24 @@
   - `verify_v16.py` 통과: 1.5s `.mp4` 업로드 → `[0.1s, 1.2s]` 트림 기준 `scene_scout` 실행(`engine=local_clip`, `effective_duration=1.1s`, `recommended_max_dur=1.5s`, `found_count=20`) 및 `/api/settings` 키 비노출·확정 `0/30` 확인
   - `test_v12.py` 회귀 테스트 전체 통과 (`ALL BACKEND TESTS PASSED!`)
 ================================================================================
+
+10. v1.7 원본 출처 네이티브 팝업 창, 원클릭 URL 복사, AI 자체 제작 음원 출처 명시
+--------------------------------------------------------------------------------
+- 원인:
+  1) FastAPI 백그라운드 스레드에서 `os.startfile(url)` 호출 시 Windows 기본 브라우저 창이 뜨지 않거나 무시되는 현상
+  2) `local://procedural`·`_mutated` 등 AI/절차적 생성 음원도 UI에 `LotsOfSounds · CC0`로 표기되고 출처 버튼이 숨겨지는 문제
+  3) URL 복사 및 창 열기 실패 시 확인 수단 부재
+- 구현 내역:
+  1) `run_desktop.py` (`DesktopApi` `js_api` 브릿지):
+     - `open_source_window(url, title)`: `webview.create_window()`로 실제 네이티브 WebView2 출처 창을 즉시 띄움
+     - `open_external_browser(url)` 및 `main.py` `/api/open_external_url`의 Windows `cmd /c start` 실행 전환
+  2) `main.py` (`resolve_source_urls`, `get_slot_candidates`):
+     - `source_kind` (`external` | `ai_generated` | `ai_mutated`) 분류 및 DB `snd.source` 반환
+  3) `index.html` · `app.js` (`v1.7`):
+     - 외부 음원 시 `🔗 원본 출처 (Freesound) ↗` + `📋 복사` 상시 버튼 + 대기열 `🔗`/`📋` 제공
+     - AI 자체 제작(`ai_generated`) 시 보라색 `🤖 AI 자체 생성 · 로컬 합성` 배지 및 `#sourceInfoModal` 안내 창 표시 (`ai_mutated`는 변형 안내 + 원곡 Freesound 주소/복사 동시 제공)
+- 검증 결과 (QA 통과):
+  - `node --check app.js` 구문 오류 0건
+  - `verify_v17.py` 통과 (`source_kind` 3종 API 검증, `/api/open_external_url` 200 OK, `index.html`/`app.js?v=1.7` 토큰, `check_update` `has_update=False`)
+  - `test_v12.py` 회귀 테스트 통과 및 `SoundReels.lnk` 재기동 확인
+================================================================================

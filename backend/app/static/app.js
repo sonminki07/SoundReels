@@ -1165,28 +1165,208 @@ soundOffsetInput.addEventListener("change", () => {
 });
 
 // =========================================================================
-// Original Source Link Opening
+// Original Source Link Opening, Clipboard Copy & AI Provenance Modal
 // =========================================================================
 
-async function openOriginalSource(url) {
-  if (!url) return;
+const btnCopySourceUrl = document.getElementById("btnCopySourceUrl");
+const sourceInfoModal = document.getElementById("sourceInfoModal");
+const sourceModalBadge = document.getElementById("sourceModalBadge");
+const sourceModalTitle = document.getElementById("sourceModalTitle");
+const sourceModalDesc = document.getElementById("sourceModalDesc");
+const sourceModalUrlsBox = document.getElementById("sourceModalUrlsBox");
+const sourceModalUrlInput = document.getElementById("sourceModalUrlInput");
+const sourceModalCatalogRow = document.getElementById("sourceModalCatalogRow");
+const sourceModalCatalogInput = document.getElementById("sourceModalCatalogInput");
+const btnModalOpenPopup = document.getElementById("btnModalOpenPopup");
+const btnModalOpenExternal = document.getElementById("btnModalOpenExternal");
+
+async function copyTextToClipboard(text, btnEl = null) {
+  if (!text) return false;
+  let ok = false;
   try {
-    const res = await fetch("/api/open_external_url", {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch (_) {}
+
+  if (!ok) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch (_) {}
+  }
+
+  if (ok && btnEl) {
+    const prev = btnEl.textContent;
+    btnEl.textContent = "✅ 복사됨!";
+    setTimeout(() => {
+      btnEl.textContent = prev;
+    }, 1500);
+  }
+  return ok;
+}
+
+function showSourceInfoModal(cand) {
+  if (!cand || !sourceInfoModal) return;
+  const kind = cand.source_kind || "external";
+  const srcUrl = cand.original_source_url || cand.catalog_url || "";
+  const catUrl = cand.catalog_url && cand.catalog_url !== srcUrl ? cand.catalog_url : "";
+
+  sourceModalTitle.textContent = cand.name || "사운드 출처 정보";
+
+  if (kind === "ai_generated") {
+    sourceModalBadge.textContent = "🤖 AI / 로컬 자체 생성";
+    sourceModalBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-bold bg-purple-950 text-purple-300 border border-purple-700";
+    sourceModalDesc.textContent = "이 효과음은 외부 사이트에서 다운로드한 음원이 아니라, AI·절차적 오디오 합성 엔진이 로컬에서 직접 생성한 100% 자체 제작 사운드입니다. 별도 외부 출처 URL이나 원작자 표기가 필요 없습니다.";
+    sourceModalUrlsBox.classList.add("hidden");
+    btnModalOpenPopup.classList.add("hidden");
+    btnModalOpenExternal.classList.add("hidden");
+  } else if (kind === "ai_mutated") {
+    sourceModalBadge.textContent = "🎲 AI 로컬 변형 + 원곡 출처";
+    sourceModalBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-950 text-indigo-300 border border-indigo-700";
+    sourceModalDesc.textContent = `기존 CC0 원곡을 기반으로 로컬에서 음높이(피치)를 변형 생성한 사운드입니다. 원곡 저작 정보(${cand.license_type || "CC0"}) 및 출처 주소는 아래에서 확인/복사할 수 있습니다.`;
+    sourceModalUrlsBox.classList.remove("hidden");
+  } else {
+    sourceModalBadge.textContent = `🌐 외부 CC0 출처 (${cand.license_type || "CC0"})`;
+    sourceModalBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-800";
+    sourceModalDesc.textContent = `원작자: ${cand.author || "LotsOfSounds / CC0 Community"} · 라이선스: ${cand.license_type || "CC0"}. 아래 버튼으로 원본 페이지 창을 열거나 주소를 바로 복사할 수 있습니다.`;
+    sourceModalUrlsBox.classList.remove("hidden");
+  }
+
+  if (srcUrl && kind !== "ai_generated") {
+    sourceModalUrlInput.value = srcUrl;
+    if (catUrl) {
+      sourceModalCatalogInput.value = catUrl;
+      sourceModalCatalogRow.classList.remove("hidden");
+    } else {
+      sourceModalCatalogRow.classList.add("hidden");
+    }
+    btnModalOpenPopup.classList.remove("hidden");
+    btnModalOpenExternal.classList.remove("hidden");
+    btnModalOpenPopup.dataset.url = srcUrl;
+    btnModalOpenPopup.dataset.title = cand.name || "원본 출처";
+    btnModalOpenExternal.dataset.url = srcUrl;
+  }
+
+  sourceInfoModal.classList.remove("hidden");
+}
+
+function closeSourceInfoModal() {
+  if (sourceInfoModal) sourceInfoModal.classList.add("hidden");
+}
+
+async function openOriginalSource(url, candObj = null) {
+  const targetCand = candObj || (currentIndex >= 0 ? currentCandidates[currentIndex] : null);
+  if (targetCand && targetCand.source_kind === "ai_generated") {
+    showSourceInfoModal(targetCand);
+    return;
+  }
+  if (!url) {
+    if (targetCand) showSourceInfoModal(targetCand);
+    return;
+  }
+
+  const title = (targetCand && targetCand.name) ? targetCand.name : "원본 출처";
+
+  // 1. Inside PyWebView Desktop App: open a real native popup window directly!
+  try {
+    if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.open_source_window === "function") {
+      const res = await window.pywebview.api.open_source_window(url, title);
+      if (res && res.status === "ok") return;
+    }
+  } catch (e) {
+    console.warn("PyWebView native source window failed:", e);
+  }
+
+  // 2. Fallback: open via OS browser command + show in-app Source Inspector modal so URL is always visible & copyable!
+  try {
+    await fetch("/api/open_external_url", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     });
-    if (res.ok) return;
   } catch (e) {
-    console.warn("Backend external open failed, falling back to window.open:", e);
+    console.warn("Backend external open failed:", e);
   }
-  window.open(url, "_blank", "noopener,noreferrer");
+  if (targetCand) showSourceInfoModal(targetCand);
 }
 
 btnOpenSourceUrl.addEventListener("click", () => {
+  const cand = currentIndex >= 0 ? currentCandidates[currentIndex] : null;
   const url = btnOpenSourceUrl.dataset.url;
-  if (url) openOriginalSource(url);
+  openOriginalSource(url, cand);
 });
+
+if (btnCopySourceUrl) {
+  btnCopySourceUrl.addEventListener("click", () => {
+    const url = btnCopySourceUrl.dataset.url;
+    if (url) copyTextToClipboard(url, btnCopySourceUrl);
+  });
+}
+
+soundBadgeSource.addEventListener("click", () => {
+  const cand = currentIndex >= 0 ? currentCandidates[currentIndex] : null;
+  if (cand) showSourceInfoModal(cand);
+});
+soundBadgeSource.style.cursor = "pointer";
+soundBadgeSource.title = "출처 상세 정보 및 주소 보기/복사";
+
+if (document.getElementById("btnCloseSourceModal")) {
+  document.getElementById("btnCloseSourceModal").addEventListener("click", closeSourceInfoModal);
+}
+if (document.getElementById("btnModalCloseBottom")) {
+  document.getElementById("btnModalCloseBottom").addEventListener("click", closeSourceInfoModal);
+}
+if (sourceInfoModal) {
+  sourceInfoModal.addEventListener("click", (e) => {
+    if (e.target === sourceInfoModal) closeSourceInfoModal();
+  });
+}
+if (document.getElementById("btnModalCopyPrimary")) {
+  document.getElementById("btnModalCopyPrimary").addEventListener("click", (e) => {
+    copyTextToClipboard(sourceModalUrlInput.value, e.currentTarget);
+  });
+}
+if (document.getElementById("btnModalCopyCatalog")) {
+  document.getElementById("btnModalCopyCatalog").addEventListener("click", (e) => {
+    copyTextToClipboard(sourceModalCatalogInput.value, e.currentTarget);
+  });
+}
+if (btnModalOpenPopup) {
+  btnModalOpenPopup.addEventListener("click", async () => {
+    const url = btnModalOpenPopup.dataset.url;
+    const title = btnModalOpenPopup.dataset.title || "원본 출처";
+    if (!url) return;
+    if (window.pywebview?.api?.open_source_window) {
+      await window.pywebview.api.open_source_window(url, title);
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  });
+}
+if (btnModalOpenExternal) {
+  btnModalOpenExternal.addEventListener("click", async () => {
+    const url = btnModalOpenExternal.dataset.url;
+    if (!url) return;
+    if (window.pywebview?.api?.open_external_browser) {
+      await window.pywebview.api.open_external_browser(url);
+    } else {
+      await fetch("/api/open_external_url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+    }
+  });
+}
 
 // =========================================================================
 // Slots & Candidates API Calls
@@ -1248,6 +1428,11 @@ async function selectSlot(slotId, autoPlay = true) {
       waveformPeaks = [];
       audioDuration = 0;
       btnOpenSourceUrl.classList.add("hidden");
+      btnOpenSourceUrl.classList.remove("inline-flex");
+      if (btnCopySourceUrl) {
+        btnCopySourceUrl.classList.add("hidden");
+        btnCopySourceUrl.classList.remove("inline-flex");
+      }
       currentSoundName.textContent = maxSearchDuration > 0 ? `${maxSearchDuration}초 이하 후보 없음` : "후보 사운드 없음";
       currentSoundMeta.textContent = maxSearchDuration > 0 ? "'🔍 새로 찾기'를 누르면 해당 길이로 다시 검색합니다" : "LotsOfSounds 검색 중이거나 대기 상태";
       queuePosition.textContent = "후보 0 / 0";
@@ -1269,22 +1454,53 @@ function playCandidate(index, autoPlay = true) {
   applyAudioGainNodes();
 
   currentSoundName.textContent = cand.name;
-  currentSoundMeta.textContent = `${cand.duration.toFixed(1)}s · ${cand.license_type} · ${cand.author || "LotsOfSounds"}`;
-  soundBadgeSource.textContent = `LotsOfSounds · ${cand.license_type}`;
+  const kind = cand.source_kind || "external";
+  if (kind === "ai_generated") {
+    currentSoundMeta.textContent = `${cand.duration.toFixed(1)}s · 🤖 AI 자체 생성 음원 (출처/저작권 자유)`;
+    soundBadgeSource.textContent = "🤖 AI 자체 생성 · 로컬 합성";
+    soundBadgeSource.className = "bg-purple-950/80 text-purple-300 font-semibold px-3 py-1 rounded-full border border-purple-700/70 truncate";
+  } else if (kind === "ai_mutated") {
+    currentSoundMeta.textContent = `${cand.duration.toFixed(1)}s · 🎲 AI 변형 (${cand.license_type}) · ${cand.author || "LotsOfSounds"}`;
+    soundBadgeSource.textContent = `🎲 AI 변형 · ${cand.license_type}`;
+    soundBadgeSource.className = "bg-indigo-950/80 text-indigo-300 font-semibold px-3 py-1 rounded-full border border-indigo-700/70 truncate";
+  } else {
+    currentSoundMeta.textContent = `${cand.duration.toFixed(1)}s · ${cand.license_type} · ${cand.author || "LotsOfSounds"}`;
+    soundBadgeSource.textContent = `LotsOfSounds · ${cand.license_type}`;
+    soundBadgeSource.className = "bg-[#242424] text-emerald-400 font-semibold px-3 py-1 rounded-full border border-emerald-900/50 truncate";
+  }
   soundMatchScore.textContent = `${Math.round(cand.score * 100)}% Match`;
   queuePosition.textContent = `후보 ${index + 1} / ${currentCandidates.length}`;
 
-  // Show/hide Original Source Link button
+  // Show Original Source Link + Copy URL OR AI Provenance Button
   const srcUrl = cand.original_source_url || cand.catalog_url;
-  if (srcUrl) {
+  if (kind === "ai_generated") {
+    btnOpenSourceUrl.dataset.url = "";
+    btnOpenSourceUrl.querySelector("span:first-child").textContent = "🤖 AI 자체 제작";
+    btnOpenSourceUrl.querySelector("span:last-child").textContent = "ℹ";
+    btnOpenSourceUrl.className = "inline-flex items-center gap-1 bg-purple-950/60 hover:bg-purple-900 text-purple-300 font-semibold px-3 py-1 rounded-full border border-purple-700/70 transition cursor-pointer shrink-0";
+    if (btnCopySourceUrl) {
+      btnCopySourceUrl.classList.add("hidden");
+      btnCopySourceUrl.classList.remove("inline-flex");
+    }
+  } else if (srcUrl) {
     btnOpenSourceUrl.dataset.url = srcUrl;
     const isFs = srcUrl.includes("freesound.org");
     btnOpenSourceUrl.querySelector("span:first-child").textContent = isFs ? "🔗 원본 출처 (Freesound)" : "🔗 원본 출처";
-    btnOpenSourceUrl.classList.remove("hidden");
-    btnOpenSourceUrl.classList.add("inline-flex");
+    btnOpenSourceUrl.querySelector("span:last-child").textContent = "↗";
+    btnOpenSourceUrl.className = "inline-flex items-center gap-1 bg-[#242424] hover:bg-[#333] text-sky-400 hover:text-sky-300 font-semibold px-3 py-1 rounded-full border border-sky-900/60 transition cursor-pointer shrink-0";
+    if (btnCopySourceUrl) {
+      btnCopySourceUrl.dataset.url = srcUrl;
+      btnCopySourceUrl.title = `주소 복사: ${srcUrl}`;
+      btnCopySourceUrl.classList.remove("hidden");
+      btnCopySourceUrl.classList.add("inline-flex");
+    }
   } else {
     btnOpenSourceUrl.classList.add("hidden");
     btnOpenSourceUrl.classList.remove("inline-flex");
+    if (btnCopySourceUrl) {
+      btnCopySourceUrl.classList.add("hidden");
+      btnCopySourceUrl.classList.remove("inline-flex");
+    }
   }
 
   // Update Like & Confirm button state
@@ -1422,16 +1638,36 @@ function renderCandidatesQueue() {
     const btnsDiv = document.createElement("div");
     btnsDiv.className = "flex items-center gap-1.5 shrink-0";
 
-    if (srcUrl) {
+    if (c.source_kind === "ai_generated") {
+      const aiBtn = document.createElement("button");
+      aiBtn.title = "AI 자체 제작 음원 정보 보기";
+      aiBtn.className = "text-purple-300 hover:text-purple-100 px-2 py-0.5 text-xs bg-purple-950/60 rounded border border-purple-700/60";
+      aiBtn.textContent = "🤖 AI";
+      aiBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        showSourceInfoModal(c);
+      });
+      btnsDiv.appendChild(aiBtn);
+    } else if (srcUrl) {
       const linkBtn = document.createElement("button");
-      linkBtn.title = "원본 출처 사이트 열기";
+      linkBtn.title = `원본 출처 창 열기 (${srcUrl})`;
       linkBtn.className = "text-sky-400 hover:text-sky-200 px-2 py-0.5 text-xs bg-[#242424] rounded border border-sky-900/40";
       linkBtn.textContent = "🔗";
       linkBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        openOriginalSource(srcUrl);
+        openOriginalSource(srcUrl, c);
       });
       btnsDiv.appendChild(linkBtn);
+
+      const copyBtn = document.createElement("button");
+      copyBtn.title = `출처 주소 복사 (${srcUrl})`;
+      copyBtn.className = "text-gray-300 hover:text-white px-2 py-0.5 text-xs bg-[#242424] rounded border border-[#383838]";
+      copyBtn.textContent = "📋";
+      copyBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        copyTextToClipboard(srcUrl, copyBtn);
+      });
+      btnsDiv.appendChild(copyBtn);
     }
 
     const playBtn = document.createElement("button");
@@ -2127,10 +2363,13 @@ window.addEventListener("keydown", (e) => {
   } else if (e.key === "m" || e.key === "M") {
     e.preventDefault();
     triggerMutateCurrent();
+  } else if (e.key === "Escape") {
+    closeSourceInfoModal();
   } else if (e.key === "o" || e.key === "O") {
     e.preventDefault();
+    const cand = currentIndex >= 0 ? currentCandidates[currentIndex] : null;
     const url = btnOpenSourceUrl.dataset.url;
-    if (url) openOriginalSource(url);
+    if (url || cand) openOriginalSource(url, cand);
   } else if (e.key === "Enter") {
     e.preventDefault();
     confirmCurrent();

@@ -11,7 +11,9 @@ import shutil
 import atexit
 import ctypes
 import msvcrt
+import subprocess
 import threading
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -101,6 +103,51 @@ def _acquire_storage_dir() -> Path:
         print(f"[SoundReels] Primary webview_storage in use; using clean folder {fallback_dir.name}", flush=True)
         return fallback_dir
 
+ALLOWED_SOURCE_HOSTS = {"freesound.org", "www.freesound.org", "lotsofsounds.com", "www.lotsofsounds.com"}
+
+
+def _is_allowed_source_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url or "")
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() in ALLOWED_SOURCE_HOSTS
+
+
+class DesktopApi:
+    """Native PyWebView JS-to-Python bridge for guaranteed window & browser launching."""
+
+    def open_source_window(self, url: str, title: str = "원본 출처"):
+        if not _is_allowed_source_url(url):
+            return {"status": "error", "detail": "Blocked URL"}
+
+        def _spawn():
+            try:
+                webview.create_window(
+                    title=f"원본 출처: {title} — {url}",
+                    url=url,
+                    width=1120,
+                    height=780,
+                    focus=True,
+                    text_select=True,
+                )
+            except Exception as exc:
+                print(f"[SoundReels] Failed to open source popup window: {exc}", flush=True)
+
+        threading.Thread(target=_spawn, daemon=True).start()
+        return {"status": "ok", "opened": url}
+
+    def open_external_browser(self, url: str):
+        if not _is_allowed_source_url(url):
+            return {"status": "error", "detail": "Blocked URL"}
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", url],
+                shell=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return {"status": "ok", "opened": url}
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
+
+
 def main():
     # 0. If window already exists, bring it to front instead of opening a colliding WebView2 instance
     if _focus_existing_window():
@@ -125,6 +172,7 @@ def main():
     webview.create_window(
         title=WINDOW_TITLE,
         url="http://127.0.0.1:8000/",
+        js_api=DesktopApi(),
         width=1380,
         height=880,
         min_size=(1080, 720),

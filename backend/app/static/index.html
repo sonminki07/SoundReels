@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SoundReels — Game SFX Explorer</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="style.css?v=1.6">
+  <link rel="stylesheet" href="style.css?v=1.7">
 </head>
 <body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans text-[14px]">
 
@@ -13,7 +13,7 @@
   <header class="h-14 border-b border-[#282828] bg-[#000000] px-6 flex items-center justify-between shrink-0 z-20">
     <div class="flex items-center space-x-3">
       <span class="text-2xl font-black tracking-tight text-[#1DB954]">🎧 SoundReels</span>
-      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v1.6</span>
+      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v1.7</span>
     </div>
     
     <!-- Search / Filter -->
@@ -103,12 +103,16 @@
         
         <!-- Top Metadata & Source Pill -->
         <div class="flex items-center justify-between text-[13px] shrink-0 gap-2">
-          <div class="flex items-center gap-2">
-            <span id="soundBadgeSource" class="bg-[#242424] text-emerald-400 font-semibold px-3 py-1 rounded-full border border-emerald-900/50">LotsOfSounds · CC0</span>
-            <button id="btnOpenSourceUrl" title="원본 사이트(출처) 브라우저로 열기 (O)"
-              class="hidden items-center gap-1 bg-[#242424] hover:bg-[#333] text-sky-400 hover:text-sky-300 font-semibold px-3 py-1 rounded-full border border-sky-900/60 transition cursor-pointer">
+          <div class="flex items-center gap-1.5 min-w-0">
+            <span id="soundBadgeSource" class="bg-[#242424] text-emerald-400 font-semibold px-3 py-1 rounded-full border border-emerald-900/50 truncate">LotsOfSounds · CC0</span>
+            <button id="btnOpenSourceUrl" title="원본 출처 사이트 창 열기 / AI 생성 정보 보기 (O)"
+              class="hidden items-center gap-1 bg-[#242424] hover:bg-[#333] text-sky-400 hover:text-sky-300 font-semibold px-3 py-1 rounded-full border border-sky-900/60 transition cursor-pointer shrink-0">
               <span>🔗 원본 출처</span>
               <span class="text-xs">↗</span>
+            </button>
+            <button id="btnCopySourceUrl" title="원본 출처 URL 클립보드에 복사"
+              class="hidden items-center gap-1 bg-[#242424] hover:bg-[#333] text-gray-300 hover:text-white font-semibold px-2.5 py-1 rounded-full border border-[#383838] transition cursor-pointer text-xs shrink-0">
+              📋 복사
             </button>
           </div>
           <div class="flex items-center gap-2">
@@ -389,9 +393,49 @@
     </div>
   </footer>
 
+  <!-- Source & AI Provenance Modal -->
+  <div id="sourceInfoModal" class="hidden fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-[#181818] border border-[#383838] rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-[#2a2a2a] pb-3">
+        <div class="flex items-center gap-2">
+          <span id="sourceModalBadge" class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">출처 확인</span>
+          <h3 id="sourceModalTitle" class="font-bold text-white text-base truncate">사운드 출처 정보</h3>
+        </div>
+        <button id="btnCloseSourceModal" class="text-gray-400 hover:text-white text-lg px-2 leading-none">✕</button>
+      </div>
+
+      <p id="sourceModalDesc" class="text-sm text-gray-300 leading-relaxed"></p>
+
+      <div id="sourceModalUrlsBox" class="hidden space-y-3">
+        <div class="space-y-1">
+          <label class="text-xs text-gray-400 font-semibold">원본 사이트 주소 (직접 선택 및 복사 가능)</label>
+          <div class="flex items-center gap-2">
+            <input id="sourceModalUrlInput" type="text" readonly
+              class="flex-1 bg-[#121212] border border-[#333] rounded-lg px-3 py-2 text-xs font-mono text-sky-300 select-all outline-none focus:border-sky-500">
+            <button id="btnModalCopyPrimary" class="px-3 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-white text-xs font-bold border border-[#383838] shrink-0">📋 복사</button>
+          </div>
+        </div>
+        <div id="sourceModalCatalogRow" class="hidden space-y-1">
+          <label class="text-xs text-gray-400 font-semibold">LotsOfSounds 카탈로그 주소</label>
+          <div class="flex items-center gap-2">
+            <input id="sourceModalCatalogInput" type="text" readonly
+              class="flex-1 bg-[#121212] border border-[#333] rounded-lg px-3 py-2 text-xs font-mono text-gray-300 select-all outline-none">
+            <button id="btnModalCopyCatalog" class="px-3 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-white text-xs font-bold border border-[#383838] shrink-0">📋 복사</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="sourceModalActions" class="flex items-center justify-end gap-2 pt-2 border-t border-[#2a2a2a]">
+        <button id="btnModalOpenPopup" class="hidden px-4 py-2 rounded-lg bg-[#1DB954] hover:bg-[#1ed760] text-black font-black text-xs">🪟 앱 새 창으로 열기</button>
+        <button id="btnModalOpenExternal" class="hidden px-4 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-sky-300 border border-sky-800 font-bold text-xs">🌐 외부 브라우저로 열기</button>
+        <button id="btnModalCloseBottom" class="px-4 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-gray-300 font-bold text-xs">닫기</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Hidden Native Audio Element -->
   <audio id="audioPlayer"></audio>
 
-  <script src="app.js?v=1.6"></script>
+  <script src="app.js?v=1.7"></script>
 </body>
 </html>
