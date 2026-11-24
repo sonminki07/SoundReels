@@ -1,7 +1,7 @@
 """
 SoundReels Desktop Application Launcher
 Runs SoundReels as a standalone native Windows desktop application window (via WebView2)
-without requiring a browser tab or command prompt window.
+with persistent storage (volume, panel sizes, settings) and custom icon.
 """
 
 import os
@@ -28,13 +28,12 @@ def is_server_ready(url: str = "http://127.0.0.1:8000/api/slots") -> bool:
 
 def start_backend():
     if not is_server_ready():
-        print("[Desktop] Starting background FastAPI server on port 8000...")
         config = uvicorn.Config(
             "backend.app.main:app",
             host="127.0.0.1",
             port=8000,
             log_level="warning",
-            loop="asyncio"
+            loop="asyncio",
         )
         server = uvicorn.Server(config)
         server.run()
@@ -44,15 +43,18 @@ def main():
     if not is_server_ready():
         server_thread = threading.Thread(target=start_backend, daemon=True)
         server_thread.start()
-        
-        # Wait up to 5s for server to start
+
         for _ in range(50):
             if is_server_ready():
                 break
             time.sleep(0.1)
 
+    storage_dir = ROOT_DIR / "data" / "webview_storage"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    icon_path = ROOT_DIR / "assets" / "soundreels.ico"
+
     # 2. Launch Standalone Native Window (Spotify Dark Style)
-    window = webview.create_window(
+    webview.create_window(
         title="SoundReels — Game SFX Explorer",
         url="http://127.0.0.1:8000/",
         width=1380,
@@ -60,11 +62,19 @@ def main():
         min_size=(1080, 720),
         background_color="#121212",
         text_select=False,
-        confirm_close=False
+        confirm_close=False,
     )
-    
-    # 3. Start webview GUI loop
-    webview.start(debug=False)
+
+    # 3. Start webview GUI loop with persistent storage (private_mode=False)
+    start_kwargs = {
+        "debug": False,
+        "private_mode": False,
+        "storage_path": str(storage_dir),
+    }
+    if icon_path.exists():
+        start_kwargs["icon"] = str(icon_path)
+
+    webview.start(**start_kwargs)
 
 if __name__ == "__main__":
     main()

@@ -122,6 +122,14 @@ def init_db():
         );
         """)
 
+        # 6. App Settings (Persistent Volume, Panel Sizes, Unity Path)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """)
+
         # Schema Migrations for existing DBs
         _ensure_column(c, "slots", "scene_media_path", "TEXT")
         _ensure_column(c, "slots", "scene_media_type", "TEXT")

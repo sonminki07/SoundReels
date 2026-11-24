@@ -4,6 +4,7 @@ import json
 import re
 import time
 import shutil
+import subprocess
 import webbrowser
 import urllib.parse
 from pathlib import Path
@@ -375,13 +376,115 @@ def trim_candidate_audio(req: AudioTrimRequest):
         conn.commit()
     return {"status": "ok", "audio_in": req.audio_in, "audio_out": req.audio_out}
 
+ALLOWED_SETTING_KEYS = {"master_volume", "left_width", "right_width", "footer_height", "unity_path"}
+
+class SettingsUpdateRequest(BaseModel):
+    settings: Dict[str, Any]
+
+@app.get("/api/settings")
+def get_settings():
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("SELECT key, value FROM app_settings")
+        data = {r["key"]: r["value"] for r in c.fetchall()}
+    return {"settings": data}
+
+@app.post("/api/settings")
+def update_settings(req: SettingsUpdateRequest):
+    with get_db_context() as conn:
+        c = conn.cursor()
+        for k, v in req.settings.items():
+            if k in ALLOWED_SETTING_KEYS:
+                c.execute("""
+                INSERT INTO app_settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+                """, (k, str(v)))
+        conn.commit()
+    return {"status": "ok"}
+
+@app.get("/api/system/check_update")
+def check_system_update():
+    """Checks GitHub origin/main for newer commits without modifying local files."""
+    try:
+        fetch_res = subprocess.run(
+            ["git", "fetch", "origin", "main"],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if fetch_res.returncode != 0:
+            return {"status": "error", "has_update": False, "message": fetch_res.stderr.strip() or "git fetch failed"}
+
+        local_rev = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=str(ROOT_DIR), text=True, timeout=5).strip()
+        remote_rev = subprocess.check_output(["git", "rev-parse", "--short", "origin/main"], cwd=str(ROOT_DIR), text=True, timeout=5).strip()
+        behind_str = subprocess.check_output(["git", "rev-list", "--count", "HEAD..origin/main"], cwd=str(ROOT_DIR), text=True, timeout=5).strip()
+        behind_count = int(behind_str or "0")
+
+        changes = []
+        if behind_count > 0:
+            log_out = subprocess.check_output(["git", "log", "-n", "5", "--oneline", "HEAD..origin/main"], cwd=str(ROOT_DIR), text=True, timeout=5).strip()
+            changes = [line for line in log_out.splitlines() if line.strip()]
+
+        return {
+            "status": "ok",
+            "has_update": behind_count > 0,
+            "behind_count": behind_count,
+            "local_rev": local_rev,
+            "remote_rev": remote_rev,
+            "changes": changes,
+        }
+    except Exception as e:
+        return {"status": "error", "has_update": False, "message": str(e)}
+
+@app.post("/api/system/apply_update")
+def apply_system_update():
+    """Pulls the latest fast-forward commits from origin/main."""
+    try:
+        before_rev = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(ROOT_DIR), text=True, timeout=5).strip()
+        pull_res = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if pull_res.returncode != 0:
+            raise HTTPException(status_code=409, detail=f"업데이트 충돌 또는 실패: {pull_res.stderr.strip()}")
+
+        after_rev = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(ROOT_DIR), text=True, timeout=5).strip()
+        changed_files = []
+        if before_rev != after_rev:
+            diff_out = subprocess.check_output(["git", "diff", "--name-only", before_rev, after_rev], cwd=str(ROOT_DIR), text=True, timeout=5).strip()
+            changed_files = [f for f in diff_out.splitlines() if f.strip()]
+
+        needs_restart = any(f.endswith(".py") for f in changed_files)
+        return {
+            "status": "ok",
+            "updated": before_rev != after_rev,
+            "local_rev": after_rev[:7],
+            "changed_files": changed_files,
+            "needs_restart": needs_restart,
+            "output": pull_res.stdout.strip(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"업데이트 실행 오류: {e}")
+
 @app.post("/api/open_external_url")
 def open_external_url(req: OpenExternalRequest):
     """Safely opens whitelisted external source URLs in the user's default browser."""
     parsed = urllib.parse.urlparse(req.url)
     if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_EXTERNAL_HOSTS:
         raise HTTPException(status_code=400, detail="URL host is not in the allowed whitelist")
-    webbrowser.open(req.url, new=2)
+    try:
+        if os.name == "nt":
+            os.startfile(req.url)
+        else:
+            webbrowser.open(req.url, new=2)
+    except Exception:
+        webbrowser.open(req.url, new=2)
     return {"status": "ok", "opened": req.url}
 
 # --- Existing Actions ---

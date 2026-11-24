@@ -99,13 +99,24 @@ const btnMute = document.getElementById("btnMute");
 const volumeSlider = document.getElementById("volumeSlider");
 const volumeLabel = document.getElementById("volumeLabel");
 
-// Master Volume (Default 40% to protect ears; persisted in localStorage)
+// Persistent Settings Helper (localStorage + SQLite /api/settings)
+function saveSetting(key, val) {
+  localStorage.setItem(`soundreels_${key}`, String(val));
+  fetch("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings: { [key]: String(val) } }),
+  }).catch(() => {});
+}
+
+// Master Volume (Default 40%, never resets across sounds or app restarts)
 let masterVolume = parseFloat(localStorage.getItem("soundreels_volume"));
+if (Number.isNaN(masterVolume)) masterVolume = parseFloat(localStorage.getItem("soundreels_master_volume"));
 if (Number.isNaN(masterVolume)) masterVolume = 0.4;
 masterVolume = Math.max(0, Math.min(1, masterVolume));
 let preMuteVolume = masterVolume > 0 ? masterVolume : 0.4;
 
-function applyMasterVolume(vol) {
+function applyMasterVolume(vol, persist = true) {
   masterVolume = Math.max(0, Math.min(1, vol));
   audioPlayer.volume = masterVolume;
   const pct = Math.round(masterVolume * 100);
@@ -115,23 +126,32 @@ function applyMasterVolume(vol) {
   else if (masterVolume < 0.35) btnMute.textContent = "🔈";
   else if (masterVolume < 0.7) btnMute.textContent = "🔉";
   else btnMute.textContent = "🔊";
-  localStorage.setItem("soundreels_volume", masterVolume.toFixed(2));
+
+  if (persist) {
+    localStorage.setItem("soundreels_volume", masterVolume.toFixed(2));
+    saveSetting("master_volume", masterVolume.toFixed(2));
+  }
 }
 
-applyMasterVolume(masterVolume);
+applyMasterVolume(masterVolume, false);
 
 volumeSlider.addEventListener("input", () => {
   const v = parseInt(volumeSlider.value, 10) / 100;
   if (v > 0) preMuteVolume = v;
-  applyMasterVolume(v);
+  applyMasterVolume(v, false);
+});
+
+volumeSlider.addEventListener("change", () => {
+  const v = parseInt(volumeSlider.value, 10) / 100;
+  applyMasterVolume(v, true);
 });
 
 btnMute.addEventListener("click", () => {
   if (masterVolume > 0) {
     preMuteVolume = masterVolume;
-    applyMasterVolume(0);
+    applyMasterVolume(0, true);
   } else {
-    applyMasterVolume(preMuteVolume > 0 ? preMuteVolume : 0.4);
+    applyMasterVolume(preMuteVolume > 0 ? preMuteVolume : 0.4, true);
   }
 });
 
@@ -141,7 +161,7 @@ if (localStorage.getItem("soundreels_unity_path")) {
   unityPathInput.value = localStorage.getItem("soundreels_unity_path");
 }
 unityPathInput.addEventListener("change", () => {
-  localStorage.setItem("soundreels_unity_path", unityPathInput.value.trim());
+  saveSetting("unity_path", unityPathInput.value.trim());
 });
 
 // =========================================================================
@@ -274,6 +294,7 @@ requestAnimationFrame(mainLoop);
 function triggerAudioFromIn() {
   if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
   initAudioContext();
+  audioPlayer.volume = masterVolume;
   audioPlayer.currentTime = audioIn;
   audioPlayer.play().catch(() => {});
 }
@@ -590,7 +611,7 @@ function resetSceneUI() {
   btnDeleteScene.classList.add("hidden");
 }
 
-async function loadSceneForSlot(slot) {
+async function loadSceneForSlot(slot, autoPlay = true) {
   resetSceneUI();
   if (!slot || !slot.scene_media_url) return;
 
@@ -614,17 +635,18 @@ async function loadSceneForSlot(slot) {
       sceneIn = Math.min(sceneIn, Math.max(0, sceneOut - 0.05));
       sceneVideo.currentTime = sceneIn;
       sceneCurrentTime = sceneIn;
-      audioTriggeredThisCycle = false;
-      sceneIsPlaying = true;
-      sceneVideo.play().catch(() => {});
+      audioTriggeredThisCycle = !autoPlay;
+      sceneIsPlaying = autoPlay;
+      if (autoPlay) sceneVideo.play().catch(() => {});
+      else sceneVideo.pause();
       updateSceneTrimUI();
     };
   } else if (slot.scene_media_type === "gif") {
-    await loadGifScene(slot.scene_media_url);
+    await loadGifScene(slot.scene_media_url, autoPlay);
   }
 }
 
-async function loadGifScene(url) {
+async function loadGifScene(url, autoPlay = true) {
   if (gifDecodeAbort) gifDecodeAbort.abort();
   gifDecodeAbort = new AbortController();
 
@@ -668,8 +690,8 @@ async function loadGifScene(url) {
     if (sceneOut <= 0 || sceneOut > sceneDuration) sceneOut = sceneDuration;
     sceneIn = Math.min(sceneIn, Math.max(0, sceneOut - 0.05));
     sceneCurrentTime = sceneIn;
-    audioTriggeredThisCycle = false;
-    sceneIsPlaying = true;
+    audioTriggeredThisCycle = !autoPlay;
+    sceneIsPlaying = autoPlay;
 
     sceneGifCanvas.classList.remove("hidden");
     if (gifFrames.length > 0) {
@@ -1008,17 +1030,15 @@ soundOffsetInput.addEventListener("change", () => {
 
 async function openOriginalSource(url) {
   if (!url) return;
-  if (window.pywebview) {
-    try {
-      await fetch("/api/open_external_url", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      return;
-    } catch (e) {
-      console.warn("Desktop external open failed, falling back to window.open:", e);
-    }
+  try {
+    const res = await fetch("/api/open_external_url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    if (res.ok) return;
+  } catch (e) {
+    console.warn("Backend external open failed, falling back to window.open:", e);
   }
   window.open(url, "_blank", "noopener,noreferrer");
 }
@@ -1042,14 +1062,15 @@ async function loadSlots() {
 
     if (!currentSlot && allSlots.length > 0) {
       const firstActive = allSlots.find(s => s.candidate_count > 0) || allSlots[0];
-      selectSlot(firstActive.id);
+      // Do NOT auto-play sound on initial app startup!
+      selectSlot(firstActive.id, false);
     }
   } catch (err) {
     console.error("Failed to load slots:", err);
   }
 }
 
-async function selectSlot(slotId) {
+async function selectSlot(slotId, autoPlay = true) {
   const slot = allSlots.find(s => s.id === slotId);
   if (!slot) return;
   currentSlot = slot;
@@ -1060,7 +1081,7 @@ async function selectSlot(slotId) {
   activeSlotBadge.textContent = `${slot.name} (${slot.candidate_count || 0} 후보)`;
 
   // Load slot's attached scene media if any
-  await loadSceneForSlot(slot);
+  await loadSceneForSlot(slot, autoPlay);
 
   try {
     loadingSpinner.classList.remove("hidden");
@@ -1073,7 +1094,7 @@ async function selectSlot(slotId) {
     renderSlotsList();
 
     if (currentCandidates.length > 0) {
-      playCandidate(0);
+      playCandidate(0, autoPlay);
     } else {
       audioPlayer.pause();
       audioPlayer.removeAttribute("src");
@@ -1091,9 +1112,9 @@ async function selectSlot(slotId) {
   }
 }
 
-function playCandidate(index) {
+function playCandidate(index, autoPlay = true) {
   if (index < 0 || index >= currentCandidates.length) return;
-  initAudioContext();
+  if (autoPlay) initAudioContext();
 
   currentIndex = index;
   const cand = currentCandidates[index];
@@ -1130,12 +1151,18 @@ function playCandidate(index) {
   // Decode bottom waveform & load trim boundaries
   decodeWaveformForCandidate(cand);
 
-  // Load audio & sync with scene if present
+  // Enforce persistent master volume before and after loading audio
   audioPlayer.pause();
+  audioPlayer.volume = masterVolume;
   audioPlayer.src = cand.audio_url;
   audioPlayer.onloadedmetadata = () => {
+    audioPlayer.volume = masterVolume;
     const startAt = cand.audio_in || 0.0;
     audioPlayer.currentTime = startAt;
+    if (!autoPlay) {
+      audioTriggeredThisCycle = true;
+      return;
+    }
     if (loopMode === "sync" && sceneMediaType) {
       // Restart scene from sceneIn so scene & new sound start together!
       sceneCurrentTime = sceneIn;
@@ -1171,26 +1198,26 @@ function renderSlotsList() {
 
   filtered.forEach(s => {
     const item = document.createElement("div");
-    item.className = `slot-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-xs ${currentSlot && currentSlot.id === s.id ? "active bg-[#282828]" : "bg-[#181818]"}`;
+    item.className = `slot-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-[13px] ${currentSlot && currentSlot.id === s.id ? "active bg-[#282828]" : "bg-[#181818]"}`;
 
     let statusBadge = "";
     if (s.status === "confirmed") {
-      statusBadge = `<span class="bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] px-1.5 py-0.5 rounded font-bold">확정</span>`;
+      statusBadge = `<span class="bg-emerald-950 text-emerald-400 border border-emerald-800 text-xs px-2 py-0.5 rounded font-bold">확정</span>`;
     } else if (s.status === "on_hold") {
-      statusBadge = `<span class="bg-[#242424] text-gray-500 text-[10px] px-1.5 py-0.5 rounded">보류</span>`;
+      statusBadge = `<span class="bg-[#242424] text-gray-500 text-xs px-2 py-0.5 rounded">보류</span>`;
     } else if (s.candidate_count > 0) {
-      statusBadge = `<span class="bg-[#242424] text-[#1DB954] text-[10px] px-1.5 py-0.5 rounded font-mono">${s.candidate_count} 후보</span>`;
+      statusBadge = `<span class="bg-[#242424] text-[#1DB954] text-xs px-2 py-0.5 rounded font-mono">${s.candidate_count} 후보</span>`;
     } else {
-      statusBadge = `<span class="bg-[#242424] text-gray-400 text-[10px] px-1.5 py-0.5 rounded">탐색 중</span>`;
+      statusBadge = `<span class="bg-[#242424] text-gray-400 text-xs px-2 py-0.5 rounded">탐색 중</span>`;
     }
 
     const sceneIcon = s.scene_media_url ? "🎬 " : "";
     item.innerHTML = `
-      <div class="truncate max-w-[190px]">
+      <div class="truncate flex-1 pr-2 min-w-0">
         <div class="font-bold text-gray-200 truncate">${sceneIcon}${s.name}</div>
-        <div class="text-[11px] text-gray-500 truncate">${s.memo}</div>
+        <div class="text-xs text-gray-400 truncate">${s.memo}</div>
       </div>
-      <div>${statusBadge}</div>
+      <div class="shrink-0">${statusBadge}</div>
     `;
 
     item.addEventListener("click", () => selectSlot(s.id));
@@ -1205,26 +1232,26 @@ function renderCandidatesQueue() {
 
   currentCandidates.forEach((c, idx) => {
     const item = document.createElement("div");
-    item.className = `candidate-item p-2 rounded flex items-center justify-between cursor-pointer text-xs ${idx === currentIndex ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#222]"}`;
+    item.className = `candidate-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-[13px] ${idx === currentIndex ? "active bg-[#282828]" : "bg-[#181818] hover:bg-[#222]"}`;
 
     const likeIcon = c.candidate_status === "liked" ? "⭐ " : "";
     const confirmedTag = c.candidate_status === "confirmed" ? " [확정]" : "";
     const srcUrl = c.original_source_url || c.catalog_url;
 
     const infoDiv = document.createElement("div");
-    infoDiv.className = "truncate max-w-[175px]";
+    infoDiv.className = "truncate flex-1 pr-2 min-w-0";
     infoDiv.innerHTML = `
       <div class="font-semibold text-gray-200 truncate">${likeIcon}${c.name}${confirmedTag}</div>
-      <div class="text-[10px] text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}%</div>
+      <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}%</div>
     `;
 
     const btnsDiv = document.createElement("div");
-    btnsDiv.className = "flex items-center gap-1 shrink-0";
+    btnsDiv.className = "flex items-center gap-1.5 shrink-0";
 
     if (srcUrl) {
       const linkBtn = document.createElement("button");
       linkBtn.title = "원본 출처 사이트 열기";
-      linkBtn.className = "text-sky-400 hover:text-sky-200 px-1.5 py-0.5 text-[10px] bg-[#242424] rounded border border-sky-900/40";
+      linkBtn.className = "text-sky-400 hover:text-sky-200 px-2 py-0.5 text-xs bg-[#242424] rounded border border-sky-900/40";
       linkBtn.textContent = "🔗";
       linkBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1234,7 +1261,7 @@ function renderCandidatesQueue() {
     }
 
     const playBtn = document.createElement("button");
-    playBtn.className = "text-gray-400 hover:text-white px-1.5 py-0.5 text-[10px] bg-[#242424] rounded";
+    playBtn.className = "text-gray-300 hover:text-white px-2 py-0.5 text-xs bg-[#242424] rounded";
     playBtn.textContent = "듣기";
     btnsDiv.appendChild(playBtn);
 
@@ -1443,6 +1470,7 @@ audioPlayer.addEventListener("timeupdate", () => {
 });
 
 audioPlayer.addEventListener("play", () => {
+  audioPlayer.volume = masterVolume;
   playIcon.classList.add("hidden");
   pauseIcon.classList.remove("hidden");
 });
@@ -1610,11 +1638,11 @@ function initResizers() {
     document.body.classList.remove("resizing");
 
     if (activeResizer === "left") {
-      localStorage.setItem("soundreels_left_width", parseInt(leftPanel.style.width, 10));
+      saveSetting("left_width", parseInt(leftPanel.style.width, 10));
     } else if (activeResizer === "right") {
-      localStorage.setItem("soundreels_right_width", parseInt(rightPanel.style.width, 10));
+      saveSetting("right_width", parseInt(rightPanel.style.width, 10));
     } else if (activeResizer === "bottom") {
-      localStorage.setItem("soundreels_footer_height", parseInt(bottomFooter.style.height, 10));
+      saveSetting("footer_height", parseInt(bottomFooter.style.height, 10));
     }
     activeResizer = null;
     resizeWaveformCanvas();
@@ -1622,6 +1650,82 @@ function initResizers() {
 }
 
 initResizers();
+
+// =========================================================================
+// Load Persisted Settings from SQLite + Self-Update Checker
+// =========================================================================
+
+async function loadSettingsFromServer() {
+  try {
+    const res = await fetch("/api/settings");
+    if (!res.ok) return;
+    const data = await res.json();
+    const s = data.settings || {};
+
+    if (s.master_volume !== undefined) {
+      const v = parseFloat(s.master_volume);
+      if (!Number.isNaN(v)) {
+        if (v > 0) preMuteVolume = v;
+        applyMasterVolume(v, false);
+      }
+    }
+    if (s.left_width) document.getElementById("leftPanel").style.width = `${s.left_width}px`;
+    if (s.right_width) document.getElementById("rightPanel").style.width = `${s.right_width}px`;
+    if (s.footer_height) document.getElementById("bottomFooter").style.height = `${s.footer_height}px`;
+    if (s.unity_path && !unityPathInput.value) unityPathInput.value = s.unity_path;
+    resizeWaveformCanvas();
+  } catch (e) {
+    console.warn("Could not load server settings:", e);
+  }
+}
+
+const btnCheckUpdate = document.getElementById("btnCheckUpdate");
+const updateDot = document.getElementById("updateDot");
+
+async function checkForUpdate(silent = true) {
+  try {
+    if (!silent) btnCheckUpdate.querySelector("span:first-child").textContent = "🔄 확인 중...";
+    const res = await fetch("/api/system/check_update");
+    const data = await res.json();
+
+    if (data.has_update) {
+      updateDot.classList.remove("hidden");
+      btnCheckUpdate.querySelector("span:first-child").textContent = `🔄 업데이트 (${data.behind_count})`;
+      btnCheckUpdate.classList.add("border-[#1DB954]", "text-emerald-300");
+
+      if (!silent) {
+        const msg = `최신 버전이 있습니다! (${data.local_rev} → ${data.remote_rev}, ${data.behind_count}개 커밋)\n\n${(data.changes || []).join("\n")}\n\n지금 최신 판으로 업데이트할까요?`;
+        if (confirm(msg)) {
+          btnCheckUpdate.querySelector("span:first-child").textContent = "⏳ 업데이트 중...";
+          const applyRes = await fetch("/api/system/apply_update", { method: "POST" });
+          const applyData = await applyRes.json();
+          if (applyRes.ok) {
+            alert(`업데이트 완료! (${applyData.local_rev})\n${applyData.needs_restart ? "백엔드 파일도 업데이트되었습니다. 페이지를 새로고침합니다 (앱의 경우 껐다 켜면 백엔드까지 100% 반영됩니다)." : "최신 UI로 새로고침합니다."}`);
+            window.location.reload();
+          } else {
+            alert(`업데이트 실패: ${applyData.detail || "오류 발생"}`);
+            btnCheckUpdate.querySelector("span:first-child").textContent = `🔄 업데이트 (${data.behind_count})`;
+          }
+        }
+      }
+    } else {
+      updateDot.classList.add("hidden");
+      btnCheckUpdate.querySelector("span:first-child").textContent = "🔄 업데이트";
+      btnCheckUpdate.classList.remove("border-[#1DB954]", "text-emerald-300");
+      if (!silent) {
+        if (data.status === "error") {
+          alert(`업데이트 확인 실패: ${data.message}`);
+        } else {
+          alert(`현재 최신 버전입니다! (${data.local_rev})`);
+        }
+      }
+    }
+  } catch (e) {
+    if (!silent) alert(`업데이트 확인 중 오류: ${e}`);
+  }
+}
+
+btnCheckUpdate.addEventListener("click", () => checkForUpdate(false));
 
 document.getElementById("searchInput").addEventListener("input", renderSlotsList);
 
@@ -1638,6 +1742,7 @@ document.querySelectorAll(".dock-btn").forEach(btn => {
         playCandidate(cIdx);
       } else {
         initAudioContext();
+        audioPlayer.volume = masterVolume;
         audioPlayer.src = sound.audio_url || `/api/sounds/${sound.sound_id}/audio`;
         audioPlayer.play().catch(() => {});
         currentSoundName.textContent = sound.name;
@@ -1689,5 +1794,6 @@ window.addEventListener("keydown", (e) => {
 });
 
 // Initial load & poll
-loadSlots();
+loadSettingsFromServer().then(() => loadSlots());
 setInterval(loadSlots, 10000);
+setTimeout(() => checkForUpdate(true), 2000);

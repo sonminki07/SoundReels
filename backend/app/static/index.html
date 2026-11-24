@@ -5,21 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SoundReels — Game SFX Explorer</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="style.css?v=1.22">
+  <link rel="stylesheet" href="style.css?v=1.3">
 </head>
-<body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans">
+<body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans text-[14px]">
 
   <!-- TOP BAR (Spotify Style) -->
   <header class="h-14 border-b border-[#282828] bg-[#000000] px-6 flex items-center justify-between shrink-0 z-20">
-    <div class="flex items-center space-x-4">
-      <div class="flex items-center space-x-2">
-        <span class="text-2xl font-black tracking-tight text-[#1DB954]">🎧 SoundReels</span>
-        <span class="text-xs bg-[#242424] text-gray-400 px-2 py-0.5 rounded border border-[#383838]">v1.2</span>
-      </div>
+    <div class="flex items-center space-x-3">
+      <span class="text-2xl font-black tracking-tight text-[#1DB954]">🎧 SoundReels</span>
+      <span class="text-xs bg-[#242424] text-gray-300 px-2.5 py-0.5 rounded border border-[#383838] font-mono">v1.3</span>
     </div>
     
     <!-- Search / Filter -->
-    <div class="flex-1 max-w-md mx-8">
+    <div class="flex-1 max-w-md mx-6">
       <div class="relative">
         <input id="searchInput" type="text" placeholder="슬롯 검색 (예: 철문, 엘리베이터, 발소리...)"
           class="w-full bg-[#242424] hover:bg-[#2a2a2a] focus:bg-[#333333] text-sm text-white px-4 py-2 pl-9 rounded-full outline-none border border-transparent focus:border-[#555] transition">
@@ -29,12 +27,17 @@
       </div>
     </div>
 
-    <div class="flex items-center space-x-3 text-xs text-gray-400">
+    <div class="flex items-center space-x-2.5 text-[13px] text-gray-300">
       <span class="inline-flex items-center gap-1.5 bg-[#181818] px-3 py-1.5 rounded-full border border-[#282828]">
         <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
         <span id="activeSlotBadge">프로젝트 로딩 중...</span>
       </span>
-      <button id="toggleLeftBtn" class="hover:text-white px-2 py-1 rounded bg-[#222]">좌측 패널</button>
+      <button id="btnCheckUpdate" title="최신 버전 확인 및 업데이트"
+        class="inline-flex items-center gap-1.5 hover:text-white px-3 py-1.5 rounded-full bg-[#1e1e1e] hover:bg-[#2c2c2c] border border-[#383838] transition text-xs font-semibold">
+        <span>🔄 업데이트</span>
+        <span id="updateDot" class="hidden w-2 h-2 rounded-full bg-[#1DB954] animate-ping"></span>
+      </button>
+      <button id="toggleLeftBtn" class="hover:text-white px-3 py-1.5 rounded-full bg-[#222] hover:bg-[#303030] border border-[#333] text-xs font-semibold">좌측 패널</button>
     </div>
   </header>
 
@@ -42,40 +45,40 @@
   <div class="flex flex-1 overflow-hidden relative">
 
     <!-- LEFT PANEL (Resizable) -->
-    <aside id="leftPanel" style="width: 240px; min-width: 150px; max-width: 460px;" class="bg-[#181818] border-r border-[#282828] p-4 flex flex-col space-y-4 shrink-0 overflow-hidden">
+    <aside id="leftPanel" style="width: 245px; min-width: 160px; max-width: 460px;" class="bg-[#181818] border-r border-[#282828] p-4 flex flex-col space-y-4 shrink-0 overflow-hidden">
       <div class="flex items-center justify-between pb-2 border-b border-[#282828]">
         <h3 class="text-xs font-bold uppercase tracking-wider text-gray-400">카테고리 필터</h3>
-        <span id="totalSlotsCount" class="text-xs text-[#1DB954] font-mono">30 Slots</span>
+        <span id="totalSlotsCount" class="text-xs text-[#1DB954] font-mono font-bold">30 Slots</span>
       </div>
-      <div id="categoryFilters" class="space-y-1 text-sm overflow-y-auto flex-1 pr-1">
-        <button data-cat="all" class="cat-btn w-full text-left px-3 py-1.5 rounded bg-[#282828] text-white font-medium">전체 보기</button>
-        <button data-cat="weapon" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">무기 / 발사</button>
-        <button data-cat="combat" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">근접 / 타격</button>
-        <button data-cat="player" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">플레이어</button>
-        <button data-cat="item" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">아이템 / 쿠키</button>
-        <button data-cat="skill" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">스킬 / 쉴드</button>
-        <button data-cat="ui" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">UI 전자음</button>
-        <button data-cat="elevator" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">엘리베이터</button>
-        <button data-cat="enemy" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">잡몹</button>
-        <button data-cat="boss" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">보스</button>
-        <button data-cat="environment" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">환경음</button>
-        <button data-cat="gimmick" class="cat-btn w-full text-left px-3 py-1.5 rounded hover:bg-[#242424] text-gray-400">기믹 / 함정</button>
+      <div id="categoryFilters" class="space-y-1 text-[14px] overflow-y-auto flex-1 pr-1">
+        <button data-cat="all" class="cat-btn active w-full text-left px-3 py-2 rounded bg-[#282828] text-white font-medium">전체 보기</button>
+        <button data-cat="weapon" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">무기 / 발사</button>
+        <button data-cat="combat" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">근접 / 타격</button>
+        <button data-cat="player" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">플레이어</button>
+        <button data-cat="item" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">아이템 / 쿠키</button>
+        <button data-cat="skill" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">스킬 / 쉴드</button>
+        <button data-cat="ui" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">UI 전자음</button>
+        <button data-cat="elevator" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">엘리베이터</button>
+        <button data-cat="enemy" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">잡몹</button>
+        <button data-cat="boss" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">보스</button>
+        <button data-cat="environment" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">환경음</button>
+        <button data-cat="gimmick" class="cat-btn w-full text-left px-3 py-2 rounded hover:bg-[#242424] text-gray-300">기믹 / 함정</button>
       </div>
       
       <!-- Safe Commercial License Badge Box -->
-      <div class="bg-[#121212] p-3 rounded-lg border border-[#2b2b2b] text-[11px] text-gray-400 space-y-1">
-        <div class="text-emerald-400 font-semibold flex items-center gap-1">
-          <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>
+      <div class="bg-[#121212] p-3 rounded-lg border border-[#2b2b2b] text-xs text-gray-400 space-y-1">
+        <div class="text-emerald-400 font-semibold flex items-center gap-1.5">
+          <svg class="w-4 h-4 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>
           상업 게임 안전 보장
         </div>
-        <p>LotsOfSounds 무인증 CC0 사운드 및 로컬 절차적 생성 음원만 대기열에 노출됩니다.</p>
+        <p class="leading-relaxed">LotsOfSounds 무인증 CC0 사운드 및 로컬 절차적 생성 음원만 대기열에 노출됩니다.</p>
       </div>
     </aside>
 
     <!-- LEFT RESIZER -->
     <div id="leftResizer" class="resizer-v" title="드래그하여 좌측 패널 크기 조절"></div>
 
-    <!-- CENTER CANVAS (Scene Screen + Menu + Control Bar + Waveform Trimmer) -->
+    <!-- CENTER CANVAS (Scene Screen + Menu + Control Bar + Waveform) -->
     <main class="flex-1 flex flex-col items-center justify-between px-6 py-3 gap-2.5 relative overflow-y-auto bg-gradient-to-b from-[#1e1e1e] to-[#121212]">
       
       <!-- Dynamic Ambient Glow Backdrop (Timbre based) -->
@@ -84,44 +87,44 @@
       <!-- Current Slot Title Breadcrumb -->
       <div class="w-full max-w-2xl text-center space-y-0.5 z-10 shrink-0">
         <div class="flex items-center justify-center gap-2">
-          <span id="currentSlotCategory" class="text-[11px] uppercase tracking-wider px-2 py-0.5 rounded bg-[#282828] text-gray-300 font-mono">SLOT</span>
-          <h2 id="currentSlotName" class="text-xl font-black text-white">슬롯 선택 필요</h2>
+          <span id="currentSlotCategory" class="text-xs uppercase tracking-wider px-2.5 py-0.5 rounded bg-[#282828] text-gray-300 font-mono">SLOT</span>
+          <h2 id="currentSlotName" class="text-2xl font-black text-white">슬롯 선택 필요</h2>
         </div>
-        <p id="currentSlotMemo" class="text-xs text-gray-400 italic truncate">기획 메모가 여기에 표시됩니다.</p>
+        <p id="currentSlotMemo" class="text-[13px] text-gray-300 italic truncate">기획 메모가 여기에 표시됩니다.</p>
       </div>
 
       <!-- 1. 소리 & 게임 장면 화면 (Scene Preview Card + Source Link + Scene Trimmer) -->
-      <div id="soundScreen" class="w-full max-w-2xl flex-1 min-h-[230px] max-h-[380px] bg-[#181818]/90 backdrop-blur-md rounded-2xl border border-[#333] shadow-2xl p-4 flex flex-col justify-between gap-2 relative overflow-hidden z-10 group">
+      <div id="soundScreen" class="w-full max-w-2xl flex-1 min-h-[240px] max-h-[400px] bg-[#181818]/90 backdrop-blur-md rounded-2xl border border-[#333] shadow-2xl p-4 flex flex-col justify-between gap-2.5 relative overflow-hidden z-10 group">
         
         <!-- Top Metadata & Source Pill -->
-        <div class="flex items-center justify-between text-xs shrink-0 gap-2">
+        <div class="flex items-center justify-between text-[13px] shrink-0 gap-2">
           <div class="flex items-center gap-2">
-            <span id="soundBadgeSource" class="bg-[#242424] text-emerald-400 font-semibold px-2.5 py-1 rounded-full border border-emerald-900/50">LotsOfSounds · CC0</span>
-            <button id="btnOpenSourceUrl" title="원본 사이트(출처) 새 탭에서 열기 (O)"
-              class="hidden items-center gap-1 bg-[#242424] hover:bg-[#333] text-sky-400 hover:text-sky-300 font-semibold px-2.5 py-1 rounded-full border border-sky-900/60 transition cursor-pointer">
+            <span id="soundBadgeSource" class="bg-[#242424] text-emerald-400 font-semibold px-3 py-1 rounded-full border border-emerald-900/50">LotsOfSounds · CC0</span>
+            <button id="btnOpenSourceUrl" title="원본 사이트(출처) 브라우저로 열기 (O)"
+              class="hidden items-center gap-1 bg-[#242424] hover:bg-[#333] text-sky-400 hover:text-sky-300 font-semibold px-3 py-1 rounded-full border border-sky-900/60 transition cursor-pointer">
               <span>🔗 원본 출처</span>
-              <span class="text-[10px]">↗</span>
+              <span class="text-xs">↗</span>
             </button>
           </div>
           <div class="flex items-center gap-2">
             <button id="btnUploadSceneTop" title="게임 장면(GIF/영상) 업로드"
-              class="bg-[#242424] hover:bg-[#333] text-gray-300 hover:text-white px-2.5 py-1 rounded-full border border-[#383838] transition text-[11px]">
+              class="bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-white px-3 py-1 rounded-full border border-[#383838] transition text-xs font-medium">
               🎬 장면 첨부
             </button>
             <button id="btnDeleteScene" title="장면 삭제"
-              class="hidden bg-[#242424] hover:bg-red-950 text-gray-400 hover:text-red-400 px-2 py-1 rounded-full border border-[#383838] transition text-[11px]">
+              class="hidden bg-[#242424] hover:bg-red-950 text-gray-400 hover:text-red-400 px-2.5 py-1 rounded-full border border-[#383838] transition text-xs">
               🗑️
             </button>
-            <span id="soundMatchScore" class="bg-[#242424] text-gray-300 font-mono px-2.5 py-1 rounded-full border border-[#383838]">92% Match</span>
+            <span id="soundMatchScore" class="bg-[#242424] text-gray-200 font-mono px-3 py-1 rounded-full border border-[#383838]">92% Match</span>
           </div>
         </div>
 
         <!-- Center Scene Preview Stage (Dropzone / Video / GIF Canvas) -->
         <div id="sceneStage" class="flex-1 min-h-[120px] relative flex items-center justify-center rounded-xl bg-black/40 border border-dashed border-[#383838] hover:border-[#1DB954]/60 transition overflow-hidden cursor-pointer">
-          <div id="sceneDropPrompt" class="text-center px-4 py-2 pointer-events-none select-none space-y-1">
-            <div class="text-2xl">🎬</div>
-            <div class="text-xs font-semibold text-gray-300">여기에 게임 장면(GIF / MP4 / WebM)을 드래그하거나 클릭하여 넣으세요</div>
-            <div class="text-[11px] text-gray-500">장면이 시작될 때 효과음이 자동으로 맞춰서 재생됩니다 (없어도 소리 탐색 가능)</div>
+          <div id="sceneDropPrompt" class="text-center px-4 py-2 pointer-events-none select-none space-y-1.5">
+            <div class="text-3xl">🎬</div>
+            <div class="text-sm font-semibold text-gray-200">여기에 게임 장면(GIF / MP4 / WebM)을 드래그하거나 클릭하여 넣으세요</div>
+            <div class="text-xs text-gray-400">장면이 시작될 때 효과음이 자동으로 맞춰서 재생됩니다 (없어도 소리 탐색 가능)</div>
           </div>
           <video id="sceneVideo" class="hidden w-full h-full object-contain" muted playsinline></video>
           <canvas id="sceneGifCanvas" class="hidden w-full h-full object-contain"></canvas>
@@ -129,18 +132,18 @@
           <input id="sceneFileInput" type="file" accept=".gif,.mp4,.webm,.mov" class="hidden">
 
           <div id="loadingSpinner" class="hidden absolute inset-0 bg-[#181818]/80 flex items-center justify-center z-20">
-            <span class="text-xs text-gray-300 animate-pulse">로딩 중...</span>
+            <span class="text-sm text-gray-200 animate-pulse">로딩 중...</span>
           </div>
         </div>
 
         <!-- Scene Clip Trim Bar (Visible when scene media is loaded) -->
         <div id="sceneTrimBar" class="hidden bg-[#121212]/95 border border-amber-900/50 rounded-lg px-3 py-2 flex flex-col gap-1.5 shrink-0">
-          <div class="flex items-center justify-between text-[11px] font-mono text-gray-300 gap-2">
+          <div class="flex items-center justify-between text-xs font-mono text-gray-300 gap-2">
             <div class="flex items-center gap-1.5 shrink-0">
-              <button id="btnScenePlayPause" title="영상/GIF 재생 또는 일시정지" class="px-1.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-amber-400 font-bold border border-[#383838]">⏯</button>
+              <button id="btnScenePlayPause" title="영상/GIF 재생 또는 일시정지" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-amber-400 font-bold border border-[#383838]">⏯</button>
               <span class="text-amber-400 font-bold">🎞️ 영상/GIF 구간 편집</span>
             </div>
-            <span id="sceneTimeLabel" class="text-gray-400">0.00s / 0.00s</span>
+            <span id="sceneTimeLabel" class="text-gray-300">0.00s / 0.00s</span>
             <span id="sceneTrimLabel" class="text-emerald-400 font-semibold">구간: 전체</span>
           </div>
 
@@ -155,96 +158,94 @@
             </div>
           </div>
 
-          <div class="flex items-center justify-between text-[11px] gap-1">
-            <div class="flex items-center gap-1.5 text-gray-400">
+          <div class="flex items-center justify-between text-xs gap-1">
+            <div class="flex items-center gap-1.5 text-gray-300">
               <span>소리 딜레이:</span>
               <input id="soundOffsetInput" type="number" step="0.05" min="0" value="0.00"
-                class="w-14 bg-[#1f1f1f] border border-[#383838] rounded px-1.5 py-0.5 text-white text-[11px] font-mono outline-none focus:border-[#1DB954]">
+                class="w-16 bg-[#1f1f1f] border border-[#383838] rounded px-1.5 py-0.5 text-white text-xs font-mono outline-none focus:border-[#1DB954]">
               <span>초</span>
             </div>
             <div class="flex items-center gap-1">
-              <button id="btnSceneSetIn" title="현재 영상 위치를 시작점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">📍 시작점</button>
-              <button id="btnSceneSetOut" title="현재 영상 위치를 끝점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🏁 끝점</button>
-              <button id="btnSceneApply" title="설정한 구간으로 자르기 적용" class="px-2 py-0.5 rounded bg-amber-900/70 hover:bg-amber-800 text-amber-200 border border-amber-700 font-semibold">✂️ 자르기</button>
-              <button id="btnSceneUndo" title="직전 구간으로 되돌리기" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">↩ 되돌리기</button>
-              <button id="btnSceneReset" title="영상/GIF 원본 구간으로 복구" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-400 border border-[#383838]">🔄 원본</button>
+              <button id="btnSceneSetIn" title="현재 영상 위치를 시작점으로" class="px-2.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">📍 시작점</button>
+              <button id="btnSceneSetOut" title="현재 영상 위치를 끝점으로" class="px-2.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🏁 끝점</button>
+              <button id="btnSceneApply" title="설정한 구간으로 자르기 적용" class="px-2.5 py-0.5 rounded bg-amber-900/70 hover:bg-amber-800 text-amber-200 border border-amber-700 font-semibold">✂️ 자르기</button>
+              <button id="btnSceneUndo" title="직전 구간으로 되돌리기" class="px-2.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">↩ 되돌리기</button>
+              <button id="btnSceneReset" title="영상/GIF 원본 구간으로 복구" class="px-2.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">🔄 원본</button>
             </div>
           </div>
         </div>
 
-        <!-- Bottom Sound Title & Direct Original Link -->
+        <!-- Bottom Sound Title -->
         <div class="flex items-end justify-between shrink-0">
           <div class="min-w-0 flex-1 pr-3">
-            <div class="flex items-center gap-2">
-              <h1 id="currentSoundName" class="text-base font-bold text-white tracking-wide truncate">사운드를 선택하세요</h1>
-            </div>
-            <p id="currentSoundMeta" class="text-xs text-gray-400 truncate">0.0s · CC0 Universal</p>
+            <h1 id="currentSoundName" class="text-lg font-bold text-white tracking-wide truncate">사운드를 선택하세요</h1>
+            <p id="currentSoundMeta" class="text-[13px] text-gray-400 truncate">0.0s · CC0 Universal</p>
           </div>
-          <span id="queuePosition" class="text-xs font-mono text-gray-500 shrink-0">1 / 8</span>
+          <span id="queuePosition" class="text-[13px] font-mono text-gray-400 shrink-0">1 / 8</span>
         </div>
       </div>
 
       <!-- 2. 메뉴 (Quick Action Buttons Bar) -->
       <div id="actionBar" class="flex items-center space-x-3 z-10 shrink-0">
         <button id="btnLike" title="찜/중간저장 (S)"
-          class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-yellow-400 border border-[#383838] text-xs font-bold transition shadow-lg active:scale-95">
+          class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-yellow-400 border border-[#383838] text-[13px] font-bold transition shadow-lg active:scale-95">
           <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"></path></svg>
           찜 (S)
         </button>
 
         <button id="btnSimilar" title="이 소리와 비슷한 것 (F)"
-          class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-cyan-400 border border-[#383838] text-xs font-bold transition shadow-lg active:scale-95">
+          class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-cyan-400 border border-[#383838] text-[13px] font-bold transition shadow-lg active:scale-95">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
           비슷한 것 (F)
         </button>
 
         <button id="btnMutate" title="즉석 변형 (M)"
-          class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-purple-400 border border-[#383838] text-xs font-bold transition shadow-lg active:scale-95">
+          class="flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#242424] hover:bg-[#333] text-gray-200 hover:text-purple-400 border border-[#383838] text-[13px] font-bold transition shadow-lg active:scale-95">
           🎲 즉석 변형 (M)
         </button>
 
         <button id="btnConfirm" title="슬롯 확정 및 채택 (Enter)"
-          class="flex items-center gap-1.5 px-6 py-2 rounded-full bg-[#1DB954] hover:bg-[#1ed760] text-black font-black text-xs transition shadow-xl active:scale-95">
+          class="flex items-center gap-1.5 px-6 py-2 rounded-full bg-[#1DB954] hover:bg-[#1ed760] text-black font-black text-[13px] transition shadow-xl active:scale-95">
           <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg>
           최종 채택 (Enter)
         </button>
       </div>
 
-      <!-- 3. 컨트롤 바 + 하단 오디오 파형 트리머 (Transport, Master Volume & Waveform) -->
+      <!-- 3. 컨트롤 바 + 하단 오디오 파형 (Transport, Master Volume & Waveform) -->
       <div id="controlBar" class="w-full max-w-2xl bg-[#181818]/90 backdrop-blur border border-[#2a2a2a] rounded-xl px-5 py-3 flex flex-col space-y-2 z-10 shadow-lg shrink-0">
         <div class="flex items-center justify-between gap-2">
           <button id="btnLoopMode" title="반복 모드 전환 (L): 장면+소리 싱크 / 소리만 / 1회 후 다음"
-            class="px-3 py-1 rounded-full bg-[#242424] hover:bg-[#303030] border border-[#3a3a3a] text-emerald-400 transition text-xs font-mono font-bold shrink-0">
+            class="px-3 py-1.5 rounded-full bg-[#242424] hover:bg-[#303030] border border-[#3a3a3a] text-emerald-400 transition text-xs font-mono font-bold shrink-0">
             🔁 🎬+🔊 싱크 반복
           </button>
 
           <div class="flex items-center justify-center space-x-5">
-            <button id="btnPrev" title="이전 사운드 (↑ / K)" class="text-gray-400 hover:text-white transition">
-              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M8.445 14.832A1 1 0 0010 14v-2.798l5.445 3.63A1 1 0 0017 14V6a1 1 0 00-1.555-.832L10 8.798V6a1 1 0 00-1.555-.832l-6 4a1 1 0 000 1.664l6 4z"></path></svg>
+            <button id="btnPrev" title="이전 사운드 (↑ / K)" class="text-gray-300 hover:text-white transition">
+              <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path d="M8.445 14.832A1 1 0 0010 14v-2.798l5.445 3.63A1 1 0 0017 14V6a1 1 0 00-1.555-.832L10 8.798V6a1 1 0 00-1.555-.832l-6 4a1 1 0 000 1.664l6 4z"></path></svg>
             </button>
             
-            <button id="btnPlay" title="재생 / 일시정지 (Space)" class="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 active:scale-95 transition shadow-lg">
+            <button id="btnPlay" title="재생 / 일시정지 (Space)" class="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 active:scale-95 transition shadow-lg">
               <svg id="playIcon" class="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg>
               <svg id="pauseIcon" class="w-5 h-5 hidden" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path></svg>
             </button>
 
-            <button id="btnNext" title="다음 사운드로 넘기기 (↓ / J)" class="text-gray-400 hover:text-white transition">
-              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M4.555 5.168A1 1 0 003 6v8a1 1 0 001.555.832L10 11.202V14a1 1 0 001.555.832l6-4a1 1 0 000-1.664l-6-4A1 1 0 0010 6v2.798L4.555 5.168z"></path></svg>
+            <button id="btnNext" title="다음 사운드로 넘기기 (↓ / J)" class="text-gray-300 hover:text-white transition">
+              <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path d="M4.555 5.168A1 1 0 003 6v8a1 1 0 001.555.832L10 11.202V14a1 1 0 001.555.832l6-4a1 1 0 000-1.664l-6-4A1 1 0 0010 6v2.798L4.555 5.168z"></path></svg>
             </button>
           </div>
 
           <!-- Master Volume Slider -->
           <div class="flex items-center gap-1.5 shrink-0" title="전체 사운드 마스터 볼륨 조절">
-            <button id="btnMute" class="text-gray-300 hover:text-white text-sm w-5 text-center leading-none">🔉</button>
-            <input id="volumeSlider" type="range" min="0" max="100" value="40" class="w-20 accent-[#1DB954] cursor-pointer h-1 bg-[#333] rounded-lg">
-            <span id="volumeLabel" class="text-[11px] font-mono text-gray-400 w-8 text-right">40%</span>
+            <button id="btnMute" class="text-gray-200 hover:text-white text-base w-6 text-center leading-none">🔉</button>
+            <input id="volumeSlider" type="range" min="0" max="100" value="40" class="w-24 accent-[#1DB954] cursor-pointer h-1.5 bg-[#333] rounded-lg">
+            <span id="volumeLabel" class="text-xs font-mono text-gray-300 w-9 text-right">40%</span>
           </div>
         </div>
 
         <!-- Time Slider -->
-        <div class="flex items-center space-x-3 text-xs font-mono text-gray-400">
+        <div class="flex items-center space-x-3 text-xs font-mono text-gray-300">
           <span id="timeCurrent">0:00</span>
-          <input id="timeSeek" type="range" min="0" max="100" value="0" class="flex-1 accent-[#1DB954] cursor-pointer h-1 bg-[#333] rounded-lg">
+          <input id="timeSeek" type="range" min="0" max="100" value="0" class="flex-1 accent-[#1DB954] cursor-pointer h-1.5 bg-[#333] rounded-lg">
           <span id="timeDuration">0:00</span>
         </div>
 
@@ -252,7 +253,6 @@
         <div id="waveformPanel" class="pt-1 border-t border-[#262626] flex flex-col gap-1">
           <div class="relative w-full h-14 bg-[#101010] rounded-lg border border-[#2a2a2a] overflow-hidden select-none">
             <canvas id="audioWaveformCanvas" class="w-full h-full cursor-crosshair"></canvas>
-            <!-- Visual In / Out Handle Indicators (hidden until expanded) -->
             <div id="audioInHandle" title="소리 시작점 드래그" class="trim-handle left-handle hidden" style="left: 0%;">
               <div class="trim-grip bg-emerald-400"></div>
             </div>
@@ -261,20 +261,20 @@
             </div>
           </div>
 
-          <div class="flex items-center justify-between text-[11px] font-mono">
-            <span id="audioTrimRangeLabel" class="text-gray-400">구간: 전체 (0.00s ~ 0.00s)</span>
-            <button id="btnToggleAudioTrim" class="px-2 py-0.5 rounded bg-[#202020] hover:bg-[#2c2c2c] text-gray-400 hover:text-gray-200 border border-[#333] transition">
+          <div class="flex items-center justify-between text-xs font-mono">
+            <span id="audioTrimRangeLabel" class="text-gray-300">구간: 전체 (0.00s ~ 0.00s)</span>
+            <button id="btnToggleAudioTrim" class="px-2.5 py-0.5 rounded bg-[#202020] hover:bg-[#2c2c2c] text-gray-300 hover:text-white border border-[#333] transition">
               ✂️ 소리 파형 편집 ▸
             </button>
           </div>
 
           <!-- Collapsible Audio Trimming Toolbar (Hidden by default) -->
-          <div id="audioTrimControls" class="hidden flex items-center justify-end gap-1.5 pt-1 text-[11px] font-mono">
-            <button id="btnAudioSetIn" title="현재 재생 위치를 시작점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">📍 시작점</button>
-            <button id="btnAudioSetOut" title="현재 재생 위치를 끝점으로" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🏁 끝점</button>
-            <button id="btnAudioApply" title="선택한 오디오 구간 저장" class="px-2 py-0.5 rounded bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 font-semibold">✂️ 자르기</button>
-            <button id="btnAudioUndo" title="이전 오디오 구간으로 되돌리기" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">↩ 되돌리기</button>
-            <button id="btnAudioReset" title="오디오 원본 길이로 초기화" class="px-2 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-400 border border-[#383838]">🔄 원본</button>
+          <div id="audioTrimControls" class="hidden flex items-center justify-end gap-1.5 pt-1 text-xs font-mono">
+            <button id="btnAudioSetIn" title="현재 재생 위치를 시작점으로" class="px-2.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">📍 시작점</button>
+            <button id="btnAudioSetOut" title="현재 재생 위치를 끝점으로" class="px-2.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-200 border border-[#383838]">🏁 끝점</button>
+            <button id="btnAudioApply" title="선택한 오디오 구간 저장" class="px-2.5 py-0.5 rounded bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-700 font-semibold">✂️ 자르기</button>
+            <button id="btnAudioUndo" title="이전 오디오 구간으로 되돌리기" class="px-2.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">↩ 되돌리기</button>
+            <button id="btnAudioReset" title="오디오 원본 길이로 초기화" class="px-2.5 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838]">🔄 원본</button>
           </div>
         </div>
       </div>
@@ -284,30 +284,30 @@
     <div id="rightResizer" class="resizer-v" title="드래그하여 우측 리스트 패널 크기 조절"></div>
 
     <!-- RIGHT PANEL: 28 SLOTS CHECKLIST & CANDIDATE QUEUE (Resizable) -->
-    <aside id="rightPanel" style="width: 320px; min-width: 220px; max-width: 580px;" class="bg-[#181818] border-l border-[#282828] flex flex-col shrink-0 overflow-hidden">
+    <aside id="rightPanel" style="width: 330px; min-width: 220px; max-width: 580px;" class="bg-[#181818] border-l border-[#282828] flex flex-col shrink-0 overflow-hidden">
       <!-- Tabs -->
-      <div class="flex border-b border-[#282828] text-xs font-bold text-center">
+      <div class="flex border-b border-[#282828] text-[13px] font-bold text-center">
         <button id="tabSlotsBtn" class="flex-1 py-3 border-b-2 border-[#1DB954] text-white">사운드 슬롯 (30)</button>
         <button id="tabCandidatesBtn" class="flex-1 py-3 border-b-2 border-transparent text-gray-400 hover:text-white">추천 대기열</button>
       </div>
 
       <!-- Tab 1: Slots List -->
-      <div id="tabSlots" class="flex-1 overflow-y-auto p-2 space-y-1">
+      <div id="tabSlots" class="flex-1 overflow-y-auto p-2 space-y-1.5">
         <!-- Rendered dynamically -->
       </div>
 
       <!-- Tab 2: Candidate Queue for Active Slot -->
-      <div id="tabCandidates" class="flex-1 overflow-y-auto p-2 space-y-1 hidden">
+      <div id="tabCandidates" class="flex-1 overflow-y-auto p-2 space-y-1.5 hidden">
         <!-- Rendered dynamically -->
       </div>
 
       <!-- Confirmed / Export Status Footer -->
-      <div class="p-3 border-t border-[#282828] bg-[#121212] text-xs space-y-2">
-        <div class="flex justify-between items-center text-gray-400">
+      <div class="p-3 border-t border-[#282828] bg-[#121212] text-[13px] space-y-2">
+        <div class="flex justify-between items-center text-gray-300">
           <span>확정 완료율</span>
           <span id="confirmedProgress" class="font-mono text-emerald-400 font-bold">0 / 30</span>
         </div>
-        <div class="w-full bg-[#242424] h-1.5 rounded-full overflow-hidden">
+        <div class="w-full bg-[#242424] h-2 rounded-full overflow-hidden">
           <div id="progressBar" class="bg-[#1DB954] h-full transition-all duration-300" style="width: 0%"></div>
         </div>
       </div>
@@ -317,40 +317,40 @@
   <!-- BOTTOM RESIZER -->
   <div id="bottomResizer" class="resizer-h" title="드래그하여 하단 영역 높이 조절"></div>
 
-  <!-- BOTTOM DOCK: [1] [2] [3] [4] [5] QUICK COMPARE & UNITY EXPORT BAR (Resizable) -->
-  <footer id="bottomFooter" style="height: 68px; min-height: 54px; max-height: 220px;" class="bg-[#000000] border-t border-[#282828] px-6 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0 z-20 overflow-y-auto">
-    <!-- Quick Compare Dock [1~5] -->
-    <div class="flex items-center space-x-2">
-      <span class="text-[11px] font-bold text-gray-400 mr-1 uppercase font-mono">비교 독:</span>
-      <div id="compareDock" class="flex items-center space-x-2">
-        <button data-dock="0" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
-          <span class="font-bold text-[10px] text-gray-500">[1]</span>
-          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+  <!-- BOTTOM DOCK: [1] [2] [3] [4] [5] QUICK COMPARE & UNITY EXPORT BAR (Resizable & Auto-Stretching) -->
+  <footer id="bottomFooter" style="height: 76px; min-height: 58px; max-height: 240px;" class="bg-[#000000] border-t border-[#282828] px-6 py-2.5 flex items-stretch justify-between gap-4 shrink-0 z-20 overflow-hidden">
+    <!-- Quick Compare Dock [1~5] (Stretches proportionally when footer grows) -->
+    <div class="flex items-stretch gap-2.5 flex-1 min-w-0 h-full">
+      <span class="text-xs font-bold text-gray-300 uppercase font-mono self-center shrink-0">비교 독:</span>
+      <div id="compareDock" class="flex-1 flex items-stretch gap-2 h-full min-w-0">
+        <button data-dock="0" class="dock-btn flex-1 min-w-[70px] h-full rounded-lg border border-[#333] bg-[#181818] hover:border-gray-400 text-gray-300 flex flex-col items-center justify-center transition px-2 overflow-hidden">
+          <span class="font-bold text-xs text-gray-400">[1]</span>
+          <span class="truncate w-full text-center text-[13px] font-medium">비어있음</span>
         </button>
-        <button data-dock="1" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
-          <span class="font-bold text-[10px] text-gray-500">[2]</span>
-          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        <button data-dock="1" class="dock-btn flex-1 min-w-[70px] h-full rounded-lg border border-[#333] bg-[#181818] hover:border-gray-400 text-gray-300 flex flex-col items-center justify-center transition px-2 overflow-hidden">
+          <span class="font-bold text-xs text-gray-400">[2]</span>
+          <span class="truncate w-full text-center text-[13px] font-medium">비어있음</span>
         </button>
-        <button data-dock="2" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
-          <span class="font-bold text-[10px] text-gray-500">[3]</span>
-          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        <button data-dock="2" class="dock-btn flex-1 min-w-[70px] h-full rounded-lg border border-[#333] bg-[#181818] hover:border-gray-400 text-gray-300 flex flex-col items-center justify-center transition px-2 overflow-hidden">
+          <span class="font-bold text-xs text-gray-400">[3]</span>
+          <span class="truncate w-full text-center text-[13px] font-medium">비어있음</span>
         </button>
-        <button data-dock="3" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
-          <span class="font-bold text-[10px] text-gray-500">[4]</span>
-          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        <button data-dock="3" class="dock-btn flex-1 min-w-[70px] h-full rounded-lg border border-[#333] bg-[#181818] hover:border-gray-400 text-gray-300 flex flex-col items-center justify-center transition px-2 overflow-hidden">
+          <span class="font-bold text-xs text-gray-400">[4]</span>
+          <span class="truncate w-full text-center text-[13px] font-medium">비어있음</span>
         </button>
-        <button data-dock="4" class="dock-btn w-20 h-10 rounded border border-[#333] bg-[#181818] hover:border-gray-400 text-xs text-gray-400 flex flex-col items-center justify-center transition truncate px-1">
-          <span class="font-bold text-[10px] text-gray-500">[5]</span>
-          <span class="truncate w-full text-center text-[10px]">비어있음</span>
+        <button data-dock="4" class="dock-btn flex-1 min-w-[70px] h-full rounded-lg border border-[#333] bg-[#181818] hover:border-gray-400 text-gray-300 flex flex-col items-center justify-center transition px-2 overflow-hidden">
+          <span class="font-bold text-xs text-gray-400">[5]</span>
+          <span class="truncate w-full text-center text-[13px] font-medium">비어있음</span>
         </button>
       </div>
     </div>
 
-    <!-- Unity Project Export Bar -->
-    <div class="flex items-center space-x-3">
+    <!-- Unity Project Export Bar (Also scales height cleanly) -->
+    <div class="flex items-stretch gap-2.5 shrink-0 h-full max-h-[72px] my-auto">
       <input id="unityPathInput" type="text" placeholder="Unity 프로젝트 경로 (예: C:/MyGame/)"
-        class="w-64 bg-[#181818] border border-[#333] text-xs text-white px-3 py-1.5 rounded outline-none focus:border-[#1DB954]">
-      <button id="btnUnityExport" class="bg-[#242424] hover:bg-[#333] text-white border border-[#444] px-4 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition">
+        class="w-64 bg-[#181818] border border-[#333] text-[13px] text-white px-3.5 rounded-lg outline-none focus:border-[#1DB954] h-full">
+      <button id="btnUnityExport" class="bg-[#242424] hover:bg-[#333] text-white border border-[#444] px-5 rounded-lg text-[13px] font-bold flex items-center gap-1.5 transition h-full shrink-0">
         <span>Unity 내보내기</span>
       </button>
     </div>
@@ -359,6 +359,6 @@
   <!-- Hidden Native Audio Element -->
   <audio id="audioPlayer"></audio>
 
-  <script src="app.js?v=1.22"></script>
+  <script src="app.js?v=1.3"></script>
 </body>
 </html>
