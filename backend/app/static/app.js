@@ -44,6 +44,7 @@ let soundOffset = 0.0;
 let sceneCurrentTime = 0.0;
 let sceneUndoStack = [];
 let sceneIsPlaying = true;
+const sceneAnalysisCache = {};
 let sceneLastTick = 0;
 let audioTriggeredThisCycle = false;
 
@@ -667,6 +668,27 @@ function resetSceneUI() {
   sceneDropPrompt.classList.remove("hidden");
   sceneTrimBar.classList.add("hidden");
   btnDeleteScene.classList.add("hidden");
+  const analysisBadge = document.getElementById("sceneAnalysisBadge");
+  if (analysisBadge) {
+    analysisBadge.classList.add("hidden");
+    analysisBadge.textContent = "";
+  }
+}
+
+function renderSceneAnalysisBadge(slotId) {
+  const analysisBadge = document.getElementById("sceneAnalysisBadge");
+  if (!analysisBadge) return;
+  const info = sceneAnalysisCache[slotId];
+  if (!info) {
+    analysisBadge.classList.add("hidden");
+    analysisBadge.textContent = "";
+    return;
+  }
+  const engineLabel = info.engine === "gemini" ? "✨ Gemini Vision" : "🤖 로컬 비전 AI";
+  const tagsStr = (info.merged_tags || []).join(", ");
+  analysisBadge.textContent = `${engineLabel}: ${info.summary_ko} · 키워드 [${tagsStr}] · 추천 ≤${info.applied_max_dur || info.recommended_max_dur}s (${info.found_count}개 탐색)`;
+  analysisBadge.title = analysisBadge.textContent;
+  analysisBadge.classList.remove("hidden");
 }
 
 async function loadSceneForSlot(slot, autoPlay = true) {
@@ -681,6 +703,7 @@ async function loadSceneForSlot(slot, autoPlay = true) {
   sceneDropPrompt.classList.add("hidden");
   sceneTrimBar.classList.remove("hidden");
   btnDeleteScene.classList.remove("hidden");
+  renderSceneAnalysisBadge(slot.id);
   resizeWaveformCanvas();
 
   if (slot.scene_media_type === "video") {
@@ -880,10 +903,69 @@ async function uploadSceneFile(file) {
     currentSlot.scene_out = 0.0;
     currentSlot.sound_offset = 0.0;
     await loadSceneForSlot(currentSlot);
+    await runSceneAwareScout(true);
   } catch (e) {
     loadingSpinner.classList.add("hidden");
     alert(`업로드 오류: ${e}`);
   }
+}
+
+async function runSceneAwareScout(isAuto = false) {
+  if (!currentSlot || !currentSlot.scene_media_url) return;
+  const targetSlotId = currentSlot.id;
+  const btnSceneScout = document.getElementById("btnSceneScout");
+  const analysisBadge = document.getElementById("sceneAnalysisBadge");
+
+  if (btnSceneScout) {
+    btnSceneScout.disabled = true;
+    btnSceneScout.textContent = "⏳ 영상 분석 중...";
+  }
+  if (analysisBadge) {
+    analysisBadge.textContent = "🤖 영상/GIF 프레임을 분석해 맞춤 사운드를 찾는 중입니다...";
+    analysisBadge.classList.remove("hidden");
+  }
+  loadingSpinner.classList.remove("hidden");
+
+  try {
+    const res = await fetch(`/api/slots/${targetSlotId}/scene_scout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scene_in: sceneIn,
+        scene_out: sceneOut,
+        max_dur: maxSearchDuration > 0 ? maxSearchDuration : null,
+        use_scene_duration: true,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (!isAuto) alert(`영상 맞춤 찾기 실패: ${data.detail || "오류 발생"}`);
+      return;
+    }
+
+    sceneAnalysisCache[targetSlotId] = data;
+    await loadSlots();
+    if (currentSlot && currentSlot.id === targetSlotId) {
+      await selectSlot(targetSlotId, true);
+    }
+    if (!isAuto && data.found_count === 0) {
+      alert("영상 기준 조건에 맞는 새 후보를 찾지 못했습니다. 최대 길이 설정을 확인해 보세요.");
+    }
+  } catch (e) {
+    console.error("Scene scout error:", e);
+    if (!isAuto) alert(`영상 분석 오류: ${e}`);
+  } finally {
+    loadingSpinner.classList.add("hidden");
+    if (btnSceneScout) {
+      btnSceneScout.disabled = false;
+      btnSceneScout.textContent = "🎬 영상 맞춤 찾기";
+    }
+  }
+}
+
+const btnSceneScout = document.getElementById("btnSceneScout");
+if (btnSceneScout) {
+  btnSceneScout.addEventListener("click", () => runSceneAwareScout(false));
 }
 
 sceneStage.addEventListener("click", (e) => {
@@ -1854,10 +1936,37 @@ async function loadSettingsFromServer() {
     if (s.right_width) document.getElementById("rightPanel").style.width = `${s.right_width}px`;
     if (s.footer_height) document.getElementById("bottomFooter").style.height = `${s.footer_height}px`;
     if (s.unity_path && !unityPathInput.value) unityPathInput.value = s.unity_path;
+    updateGeminiKeyBtnUI(s.has_gemini_key === "true");
     resizeWaveformCanvas();
   } catch (e) {
     console.warn("Could not load server settings:", e);
   }
+}
+
+function updateGeminiKeyBtnUI(hasKey) {
+  const btn = document.getElementById("btnGeminiKey");
+  if (!btn) return;
+  if (hasKey) {
+    btn.textContent = "🔑 Gemini 활성";
+    btn.className = "hover:text-white px-3 py-1.5 rounded-full bg-emerald-950 hover:bg-emerald-900 border border-[#1DB954] text-xs font-bold text-emerald-300";
+  } else {
+    btn.textContent = "🔑 AI 키 (로컬)";
+    btn.className = "hover:text-white px-3 py-1.5 rounded-full bg-[#222] hover:bg-[#303030] border border-[#333] text-xs font-semibold text-gray-300";
+  }
+}
+
+const btnGeminiKey = document.getElementById("btnGeminiKey");
+if (btnGeminiKey) {
+  btnGeminiKey.addEventListener("click", async () => {
+    const val = prompt(
+      "Gemini API 키를 입력하면 영상/GIF 장면을 Gemini Vision으로 더 정밀하게 분석합니다.\n" +
+      "(비워 두고 확인을 누르면 무료 로컬 비전 AI 모드로 전환됩니다.)",
+      ""
+    );
+    if (val === null) return;
+    await saveSetting("gemini_api_key", val.trim());
+    await loadSettingsFromServer();
+  });
 }
 
 // Max Duration Filter & Live Re-Scout Handlers

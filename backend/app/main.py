@@ -19,11 +19,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
 
 # Ensure repo root is on sys.path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+load_dotenv(ROOT_DIR / ".env")
 
 from backend.app.core.db import (
     get_db_context,
@@ -37,6 +40,8 @@ from backend.app.services.loudness import compute_norm_gain
 
 _scout_instance = None
 _scout_lock = threading.Lock()
+_scene_analyzer_instance = None
+_scene_analyzer_lock = threading.Lock()
 
 def get_scout():
     global _scout_instance
@@ -45,6 +50,14 @@ def get_scout():
             from backend.app.services.sound_scout import SoundScout
             _scout_instance = SoundScout(device="cuda")
     return _scout_instance
+
+def get_scene_analyzer():
+    global _scene_analyzer_instance
+    with _scene_analyzer_lock:
+        if _scene_analyzer_instance is None:
+            from backend.app.services.scene_analyzer import SceneAnalyzer
+            _scene_analyzer_instance = SceneAnalyzer()
+    return _scene_analyzer_instance
 
 app = FastAPI(title="SoundReels API", version="1.2.0")
 
@@ -281,14 +294,94 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
 class RescoutRequest(BaseModel):
     max_dur: Optional[float] = Field(default=None, ge=0.0)
 
+class SceneScoutRequest(BaseModel):
+    scene_in: Optional[float] = Field(default=None, ge=0.0)
+    scene_out: Optional[float] = Field(default=None, ge=0.0)
+    max_dur: Optional[float] = Field(default=None, ge=0.0)
+    use_scene_duration: bool = True
+
 @app.post("/api/slots/{slot_id}/rescout")
 def rescout_slot_with_duration(slot_id: str, req: RescoutRequest):
     """Re-searches LotsOfSounds and scores with CLAP under the user's max duration constraint."""
     validate_id(slot_id, "slot_id")
     scout = get_scout()
     max_d = req.max_dur if (req.max_dur and req.max_dur > 0) else None
-    found_count = scout.scout_slot(slot_id, max_candidates_per_query=12, max_duration=max_d, allow_on_hold=True)
+    found_count = scout.scout_slot(
+        slot_id,
+        max_candidates_per_query=12,
+        max_duration=max_d,
+        allow_on_hold=True,
+        prioritize_by_score=True,
+    )
     return {"status": "ok", "slot_id": slot_id, "found_count": found_count}
+
+@app.post("/api/slots/{slot_id}/scene_scout")
+def scout_slot_from_scene(slot_id: str, req: SceneScoutRequest):
+    """Analyzes the uploaded scene video/GIF (keyframes, motion, duration) and scouts tailored SFX."""
+    validate_id(slot_id, "slot_id")
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM slots WHERE id = ?", (slot_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Slot not found")
+        slot = dict(row)
+
+        c.execute("SELECT value FROM app_settings WHERE key = 'gemini_api_key'")
+        key_row = c.fetchone()
+        stored_gemini_key = key_row["value"].strip() if key_row and key_row["value"] else None
+
+    if not slot.get("scene_media_path"):
+        raise HTTPException(status_code=400, detail="No scene video or GIF attached to this slot")
+
+    media_path = Path(slot["scene_media_path"]).resolve()
+    if not media_path.is_relative_to(SCENE_CACHE_DIR.resolve()) or not media_path.exists():
+        raise HTTPException(status_code=404, detail="Attached scene media file not found")
+
+    s_in = req.scene_in if req.scene_in is not None else float(slot.get("scene_in") or 0.0)
+    s_out = req.scene_out if req.scene_out is not None else float(slot.get("scene_out") or 0.0)
+
+    analyzer = get_scene_analyzer()
+    analysis = analyzer.analyze_and_merge(
+        media_path=media_path,
+        media_type=slot.get("scene_media_type") or "video",
+        slot=slot,
+        scene_in=s_in,
+        scene_out=s_out,
+        gemini_api_key=stored_gemini_key,
+    )
+
+    if req.max_dur and req.max_dur > 0:
+        effective_max_dur: Optional[float] = float(req.max_dur)
+    elif req.use_scene_duration:
+        effective_max_dur = float(analysis["recommended_max_dur"])
+    else:
+        effective_max_dur = None
+
+    scout = get_scout()
+    found_count = scout.scout_slot(
+        slot_id=slot_id,
+        max_candidates_per_query=12,
+        max_duration=effective_max_dur,
+        allow_on_hold=True,
+        custom_search_tags=analysis["merged_tags"],
+        custom_clap_prompts=analysis["merged_prompts"],
+        prioritize_by_score=True,
+    )
+
+    return {
+        "status": "ok",
+        "slot_id": slot_id,
+        "found_count": found_count,
+        "engine": analysis["engine"],
+        "summary_ko": analysis["summary_ko"],
+        "visual_tags": analysis["visual_tags"],
+        "merged_tags": analysis["merged_tags"],
+        "effective_duration": analysis["effective_duration"],
+        "motion_profile": analysis["motion_profile"],
+        "recommended_max_dur": analysis["recommended_max_dur"],
+        "applied_max_dur": effective_max_dur,
+    }
 
 @app.get("/api/sounds/{sound_id}/audio")
 def get_sound_audio(sound_id: str):
@@ -431,7 +524,16 @@ def trim_candidate_audio(req: AudioTrimRequest):
         conn.commit()
     return {"status": "ok", "audio_in": req.audio_in, "audio_out": req.audio_out}
 
-ALLOWED_SETTING_KEYS = {"master_volume", "left_width", "right_width", "footer_height", "unity_path", "norm_enabled", "max_search_dur"}
+ALLOWED_SETTING_KEYS = {
+    "master_volume",
+    "left_width",
+    "right_width",
+    "footer_height",
+    "unity_path",
+    "norm_enabled",
+    "max_search_dur",
+    "gemini_api_key",
+}
 
 class SettingsUpdateRequest(BaseModel):
     settings: Dict[str, Any]
@@ -441,8 +543,12 @@ def get_settings():
     with get_db_context() as conn:
         c = conn.cursor()
         c.execute("SELECT key, value FROM app_settings")
-        data = {r["key"]: r["value"] for r in c.fetchall()}
-    return {"settings": data}
+        raw = {r["key"]: r["value"] for r in c.fetchall()}
+    has_db_key = bool((raw.pop("gemini_api_key", "") or "").strip())
+    env_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    has_env_key = bool(env_key and env_key != "your_gemini_api_key_here")
+    raw["has_gemini_key"] = "true" if (has_db_key or has_env_key) else "false"
+    return {"settings": raw}
 
 @app.post("/api/settings")
 def update_settings(req: SettingsUpdateRequest):
@@ -450,10 +556,13 @@ def update_settings(req: SettingsUpdateRequest):
         c = conn.cursor()
         for k, v in req.settings.items():
             if k in ALLOWED_SETTING_KEYS:
-                c.execute("""
-                INSERT INTO app_settings (key, value) VALUES (?, ?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value;
-                """, (k, str(v)))
+                if k == "gemini_api_key" and not str(v).strip():
+                    c.execute("DELETE FROM app_settings WHERE key = 'gemini_api_key'")
+                else:
+                    c.execute("""
+                    INSERT INTO app_settings (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+                    """, (k, str(v).strip() if k == "gemini_api_key" else str(v)))
         conn.commit()
     return {"status": "ok"}
 

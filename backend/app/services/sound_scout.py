@@ -161,6 +161,9 @@ class SoundScout:
         max_candidates_per_query: int = 10,
         max_duration: Optional[float] = None,
         allow_on_hold: bool = False,
+        custom_search_tags: Optional[List[str]] = None,
+        custom_clap_prompts: Optional[List[str]] = None,
+        prioritize_by_score: bool = False,
     ) -> int:
         """Finds, downloads, embeds, ranks and records candidates for a single slot."""
         with get_db_context() as conn:
@@ -175,8 +178,8 @@ class SoundScout:
             print(f"[SoundScout] Skipping slot '{slot['name']}' (Status: on_hold)")
             return 0
 
-        search_tags = json.loads(slot.get("search_tags") or "[]")
-        clap_prompts = json.loads(slot.get("clap_prompts") or "[]")
+        search_tags = custom_search_tags if custom_search_tags else json.loads(slot.get("search_tags") or "[]")
+        clap_prompts = custom_clap_prompts if custom_clap_prompts else json.loads(slot.get("clap_prompts") or "[]")
 
         # 1. Search across tags (Network I/O without holding DB connection)
         raw_sounds = []
@@ -263,6 +266,17 @@ class SoundScout:
                 if c.rowcount > 0:
                     next_rank += 1
                     added += 1
+
+            if prioritize_by_score:
+                c.execute("""
+                SELECT id FROM slot_candidates
+                WHERE slot_id = ? AND status != 'skipped'
+                ORDER BY
+                    CASE status WHEN 'confirmed' THEN 0 WHEN 'liked' THEN 1 ELSE 2 END ASC,
+                    score DESC
+                """, (slot_id,))
+                for idx_rank, r in enumerate(c.fetchall(), start=1):
+                    c.execute("UPDATE slot_candidates SET rank = ? WHERE id = ?", (idx_rank, r["id"]))
 
             if scored_candidates and slot["status"] == "pending":
                 c.execute("UPDATE slots SET status = 'has_candidates' WHERE id = ?", (slot_id,))
