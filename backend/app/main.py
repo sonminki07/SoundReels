@@ -140,6 +140,7 @@ class BatchExportRequest(BaseModel):
 class SimilarRequest(BaseModel):
     slot_id: str
     reference_sound_id: str
+    max_dur: Optional[float] = Field(default=None, ge=0.0)
 
 class MutateRequest(BaseModel):
     slot_id: str
@@ -861,24 +862,25 @@ def unconfirm_candidate(req: UnconfirmRequest):
 
 @app.post("/api/actions/reorder_similar")
 def reorder_similar(req: SimilarRequest):
+    """Finds new similar sounds by tags & ranks all candidates via CLAP audio-to-audio similarity."""
     validate_id(req.slot_id, "slot_id")
     validate_id(req.reference_sound_id, "reference_sound_id")
-
-    with get_db_context() as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM slot_candidates WHERE slot_id = ? ORDER BY score DESC", (req.slot_id,))
-        rows = [dict(r) for r in c.fetchall()]
-
-        ref_item = next((r for r in rows if r["sound_id"] == req.reference_sound_id), None)
-        other_items = [r for r in rows if r["sound_id"] != req.reference_sound_id]
-
-        if ref_item:
-            new_order = [ref_item] + other_items
-            for rank_idx, item in enumerate(new_order, start=1):
-                c.execute("UPDATE slot_candidates SET rank = ? WHERE id = ?", (rank_idx, item["id"]))
-            conn.commit()
-
-    return {"status": "ok", "message": "Candidates reordered by similarity anchor"}
+    max_d = req.max_dur if (req.max_dur and req.max_dur > 0) else None
+    scout = get_scout()
+    result = scout.find_similar_to_sound(
+        slot_id=req.slot_id,
+        reference_sound_id=req.reference_sound_id,
+        max_duration=max_d,
+    )
+    return {
+        "status": "ok",
+        "reference_sound_id": req.reference_sound_id,
+        "found_new": result["found_new"],
+        "total_ranked": result["total_ranked"],
+        "top_similar_index": result["top_similar_index"],
+        "queries_used": result["queries_used"],
+        "message": f"CLAP 오디오 유사도 기준 정렬 완료 (새 후보 {result['found_new']}개 추가)",
+    }
 
 @app.post("/api/actions/mutate")
 def mutate_sound(req: MutateRequest):

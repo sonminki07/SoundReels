@@ -8,6 +8,7 @@ let showConfirmedOnly = false;
 let currentSlot = null;
 let currentCandidates = [];
 let currentIndex = -1;
+let similarAnchorSoundId = null;
 let compareDock = [null, null, null, null, null];
 
 // Loop Modes: 'sync' (Scene+Audio Sync Loop) | 'audio' (Audio-Only Loop) | 'once' (1x then Next)
@@ -1491,6 +1492,7 @@ async function selectSlot(slotId, autoPlay = true) {
   const slot = allSlots.find(s => s.id === slotId);
   if (!slot) return;
   currentSlot = slot;
+  similarAnchorSoundId = null;
 
   currentSlotName.textContent = slot.name;
   currentSlotCategory.textContent = slot.category.toUpperCase();
@@ -1717,6 +1719,9 @@ function renderCandidatesQueue() {
     const confirmedTag = isConfirmed
       ? `<span class="ml-1.5 bg-[#1DB954] text-black text-[11px] px-2 py-0.5 rounded-full font-black">✅ 확정됨</span>`
       : "";
+    const anchorTag = (similarAnchorSoundId && c.sound_id === similarAnchorSoundId)
+      ? `<span class="ml-1.5 bg-cyan-950 text-cyan-300 border border-cyan-700 text-[10px] px-1.5 py-0.5 rounded font-bold">🎯 기준음</span>`
+      : "";
     const srcUrl = c.original_source_url || c.catalog_url;
 
     const infoDiv = document.createElement("div");
@@ -1727,7 +1732,7 @@ function renderCandidatesQueue() {
     infoDiv.innerHTML = `
       <span class="shrink-0 bg-[#242424] text-[#1DB954] font-mono font-bold text-xs px-2 py-1 rounded border border-[#333]">#${idx + 1}</span>
       <div class="truncate min-w-0">
-        <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}</div>
+        <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}${anchorTag}</div>
         <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${speedPill}</div>
       </div>
     `;
@@ -1868,21 +1873,48 @@ function updateCompareDockUI() {
 async function triggerSimilarCurrent() {
   if (currentIndex < 0 || !currentCandidates[currentIndex] || !currentSlot) return;
   const cand = currentCandidates[currentIndex];
+  const btnSimilar = document.getElementById("btnSimilar");
+  const prevLabel = btnSimilar ? btnSimilar.innerHTML : "";
+  if (btnSimilar) {
+    btnSimilar.disabled = true;
+    btnSimilar.textContent = "⏳ 비슷한 소리 찾는 중...";
+  }
+  loadingSpinner.classList.remove("hidden");
+
   try {
     const res = await fetch("/api/actions/reorder_similar", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slot_id: currentSlot.id, reference_sound_id: cand.sound_id }),
+      body: JSON.stringify({
+        slot_id: currentSlot.id,
+        reference_sound_id: cand.sound_id,
+        max_dur: maxSearchDuration > 0 ? maxSearchDuration : null,
+      }),
     });
+    const simData = await res.json();
     if (res.ok) {
-      const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates`);
+      similarAnchorSoundId = cand.sound_id;
+      const qParam = maxSearchDuration > 0 ? `?max_dur=${encodeURIComponent(maxSearchDuration)}` : "";
+      const cRes = await fetch(`/api/slots/${currentSlot.id}/candidates${qParam}`);
       const cData = await cRes.json();
       currentCandidates = cData.candidates || [];
+      await loadSlots();
       renderCandidatesQueue();
-      playCandidate(0);
+
+      // Play the top NEW/OTHER acoustically similar sound (#2, index 1), NOT replaying the anchor (#1)!
+      const targetIdx = currentCandidates.length > 1
+        ? Math.min(currentCandidates.length - 1, Math.max(1, simData.top_similar_index || 1))
+        : 0;
+      playCandidate(targetIdx, true);
     }
   } catch (e) {
     console.error("Similar error:", e);
+  } finally {
+    loadingSpinner.classList.add("hidden");
+    if (btnSimilar) {
+      btnSimilar.disabled = false;
+      btnSimilar.innerHTML = prevLabel;
+    }
   }
 }
 
