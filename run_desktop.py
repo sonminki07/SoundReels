@@ -37,7 +37,8 @@ def is_server_ready(url: str = "http://127.0.0.1:8000/api/slots") -> bool:
         return False
 
 def start_backend():
-    if not is_server_ready():
+    try:
+        print("[SoundReels] Starting embedded FastAPI backend...", flush=True)
         config = uvicorn.Config(
             "backend.app.main:app",
             host="127.0.0.1",
@@ -47,6 +48,9 @@ def start_backend():
         )
         server = uvicorn.Server(config)
         server.run()
+    except Exception as exc:
+        import traceback
+        print(f"[SoundReels] Backend crashed: {exc}\n{traceback.format_exc()}", flush=True)
 
 def main():
     # 1. Start backend thread if needed
@@ -56,6 +60,7 @@ def main():
 
         for _ in range(150):
             if is_server_ready():
+                print("[SoundReels] Backend ready on http://127.0.0.1:8000/", flush=True)
                 break
             time.sleep(0.1)
 
