@@ -19,6 +19,7 @@ from typing import List, Dict, Any, Optional
 
 import torch
 import librosa
+import soundfile as sf
 from transformers import ClapModel, ClapProcessor
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -108,6 +109,11 @@ class SoundScout:
         sha256_hash = hasher.hexdigest()
 
         norm_gain = compute_norm_gain(local_file)
+        actual_duration = float(sound_item.get("duration", 0.0) or 0.0)
+        try:
+            actual_duration = float(sf.info(str(local_file)).duration)
+        except Exception:
+            pass
 
         return {
             "id": sound_id,
@@ -115,7 +121,7 @@ class SoundScout:
             "source_id": sound_id,
             "name": sound_item["name"],
             "file_path": str(local_file),
-            "duration": sound_item.get("duration", 0.0),
+            "duration": round(actual_duration, 3),
             "license_type": "CC0",
             "author": "LotsOfSounds / CC0 Community",
             "source_url": f"https://lotsofsounds.com/sounds/{sound_id}",

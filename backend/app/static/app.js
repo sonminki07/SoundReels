@@ -50,6 +50,7 @@ let currentPlaybackRate = 1.0;
 let currentPreservePitch = true;
 let audioUndoStack = [];
 let audioDecodeAbort = null;
+let waveformDecodeSeq = 0;
 let isDraggingAudioHandle = null; // 'in' | 'out' | 'scrub' | null
 
 // Shortcut & Playback Settings State
@@ -419,6 +420,7 @@ resizeWaveformCanvas();
 async function decodeWaveformForCandidate(cand) {
   if (audioDecodeAbort) audioDecodeAbort.abort();
   audioDecodeAbort = new AbortController();
+  const mySeq = ++waveformDecodeSeq;
 
   waveformPeaks = [];
   audioDuration = cand.duration || 0;
@@ -434,7 +436,11 @@ async function decodeWaveformForCandidate(cand) {
     initAudioContext();
     const resp = await fetch(cand.audio_url, { signal: audioDecodeAbort.signal });
     const buf = await resp.arrayBuffer();
+    if (mySeq !== waveformDecodeSeq) return;
     const decoded = await audioCtx.decodeAudioData(buf);
+    if (mySeq !== waveformDecodeSeq) return;
+    if (!currentCandidates[currentIndex] || currentCandidates[currentIndex].sound_id !== cand.sound_id) return;
+
     audioDuration = decoded.duration;
 
     if (cand.audio_out <= 0 || cand.audio_out > audioDuration) {
@@ -1641,10 +1647,22 @@ function playCandidate(index, autoPlay = true) {
   applyAudioPlaybackSpeed();
   audioPlayer.src = cand.audio_url;
   audioPlayer.onloadedmetadata = () => {
+    if (!currentCandidates[currentIndex] || currentCandidates[currentIndex].sound_id !== cand.sound_id) return;
     applyAudioGainNodes();
     applyAudioPlaybackSpeed();
+    if (Number.isFinite(audioPlayer.duration) && audioPlayer.duration > 0) {
+      if (!waveformPeaks.length) {
+        audioDuration = audioPlayer.duration;
+        if (cand.audio_out <= 0 || cand.audio_out > audioDuration) {
+          audioOut = audioDuration;
+        }
+        updateAudioTrimUI();
+      }
+      timeDuration.textContent = formatTime(audioDuration || audioPlayer.duration);
+    }
     const startAt = cand.audio_in || 0.0;
     audioPlayer.currentTime = startAt;
+    timeCurrent.textContent = formatTime(startAt);
     if (!autoPlay) {
       audioTriggeredThisCycle = true;
       return;

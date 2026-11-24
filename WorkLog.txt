@@ -271,3 +271,13 @@
   - 미확정 슬롯에 `찜(liked)`된 후보가 있으면 `selectSlot()` 시 첫 번째 후보 대신 해당 찜 후보(저장된 `audio_in`, `audio_out`, `playback_rate`, `preserve_pitch` 포함)를 즉시 선택/표시하도록 개선
   - `playCandidate()` 시 현재 슬롯 비교 독 활성 하이라이트 동기화 및 추천 대기열 항목에 `✂️ 구간` 배지 표시 추가
 ================================================================================
+
+15. v2.0.2 긴 음원 빠른 전환 시 파형/길이 덮어쓰기(2초 루프 현상) 및 실제 파일 길이 동기화 수정
+--------------------------------------------------------------------------------
+- 원인:
+  1) `52.46s` 대형 음원(`Cable Car Arrival`)을 지나 `2.36s` 음원(`Doorbell Ring`)으로 빠르게 넘길 때 `AbortController`가 `fetch`만 취소하고 이미 진행 중인 `audioCtx.decodeAudioData()`를 취소하지 못해, 뒤늦게 완료된 이전 음원의 `audioDuration=52.46s`와 파형이 현재 음원을 덮어써서 UI는 `0:52`로 보이지만 실제 음원은 `2.36s`에서 끝나 반복 재생되던 레이스 컨디션 발생
+  2) LotsOfSounds API 메타데이터 길이(`4.27s`)와 실제 MP3 파일 길이(`2.36s`) 불일치(전체 275곡 중 71곡)
+- 수정 내역:
+  1) `app.js` (`waveformDecodeSeq`): 비동기 `fetch`·`decodeAudioData` 전후에 시퀀스 번호 및 현재 `sound_id` 일치 검증을 추가하고 `onloadedmetadata` 시간 동기화 보강
+  2) `sound_scout.py` (`download_sound`) & DB 일괄 보정: `soundfile.info(local_file).duration`으로 실제 MP3 길이를 측정해 DB `sounds.duration` 동기화
+================================================================================
