@@ -2107,10 +2107,11 @@ function renderSimilarStatusBanner() {
   }
   const st = similarRoundStatusBySlot[currentSlot.id];
   const promptPart = st.promptUsed ? ` · 조건: "${st.promptUsed}"` : "";
+  const filterPart = st.filteredOut > 0 ? ` · 불량/초과 ${st.filteredOut}개 제외` : "";
   const kwPart = Array.isArray(st.queriesUsed) && st.queriesUsed.length > 0
     ? ` · 탐색 키워드: ${st.queriesUsed.join(", ")}`
     : "";
-  banner.textContent = `🎯 유사 탐색 #${st.roundNo}회차 완료: +${st.foundNew}개 늘어남 (총 ${st.totalRanked}개)${promptPart}${kwPart}`;
+  banner.textContent = `🎯 유사 탐색 #${st.roundNo}회차 완료: +${st.foundNew}개 늘어남 (총 ${st.totalRanked}개)${filterPart}${promptPart}${kwPart}`;
   banner.classList.remove("hidden");
 }
 
@@ -2164,6 +2165,7 @@ async function executeSimilarSearch(customPrompt = "") {
       similarRoundStatusBySlot[currentSlot.id] = {
         roundNo: simData.round_no || 1,
         foundNew: simData.found_new || 0,
+        filteredOut: simData.filtered_out || 0,
         totalRanked: simData.total_ranked || 0,
         promptUsed: simData.prompt_used || "",
         queriesUsed: simData.queries_used || [],

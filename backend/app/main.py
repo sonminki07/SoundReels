@@ -991,6 +991,7 @@ def reorder_similar(req: SimilarRequest):
         "reference_sound_id": req.reference_sound_id,
         "round_no": result.get("round_no", 1),
         "found_new": result["found_new"],
+        "filtered_out": result.get("filtered_out", 0),
         "total_ranked": result["total_ranked"],
         "top_similar_index": result["top_similar_index"],
         "queries_used": result["queries_used"],
@@ -1350,6 +1351,13 @@ def popup_import_url(req: ImportUrlRequest):
         **result,
     }
     return {"status": "ok", "seq": _desktop_popup_state["import_seq"], "slot_id": target_slot_id, **result}
+
+@app.post("/api/system/cleanup_quality")
+def cleanup_quality_candidates():
+    """Moves existing unliked/unconfirmed bad, oversized, speech, or tone/noise rows to trash."""
+    scout = get_scout()
+    summary = scout.cleanup_existing_bad_candidates()
+    return {"status": "ok", **summary}
 
 # Mount static files for Frontend
 STATIC_DIR = Path(__file__).resolve().parent / "static"

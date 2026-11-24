@@ -101,6 +101,34 @@ def _extract_english_prompt_terms(prompt_text: str) -> List[str]:
     return terms
 
 
+BAD_TONE_NOISE_TOKENS = {
+    "sine wave", "test tone", "oscillator", "purple noise", "blue noise", "pink noise",
+    "white noise", "brown noise", "grey noise", "frequency sweep", "dtmf", "dial tone",
+    "calibration", "tinnitus", "ear ringing", "1000hz", "440hz", "1khz", "hz tone",
+    "sample pack", "sound pack", "sfx pack", "loop pack", "compilation", "demo reel",
+}
+BAD_SPEECH_TOKENS = {
+    "speech", "talking", "voiceover", "voice over", "narration", "narrator",
+    "podcast", "interview", "dialogue", "conversation", "spoken word", "human voice",
+    "crowd chatter", "singing", "lyrics", "acapella", "announcer", "laughing",
+    "reading aloud", "monologue", "commentary", "whispering", "chatter",
+}
+BAD_MUSIC_TOKENS = {
+    "opening theme", "background music", "bgm", "soundtrack", "full song",
+    "chord progression", "piano theme", "piano solo", "orchestral theme", "synthwave",
+    "ambient music", "chillout", "relaxation track",
+}
+VOICE_OK_SLOT_IDS = {"sfx_player_hurt", "sfx_mob_death", "sfx_mob_male_swing"}
+TONAL_OK_SLOT_IDS = {"sfx_elevator_bell", "sfx_ui_tab_open", "sfx_ui_tab_close", "sfx_elevator_button", "sfx_shield_bubble_activate"}
+GENERIC_SIMILAR_STOP_WORDS = {
+    "sound", "audio", "sfx", "effect", "effects", "tags", "tag", "cc0", "freesound",
+    "loop", "file", "noise", "close", "open", "down", "up", "slowed", "fast",
+    "high", "low", "heavy", "light", "big", "small", "good", "bad", "free", "game",
+    "alt", "ver", "version", "mix", "part", "one", "two", "new", "old", "short", "long",
+    "recording", "field-recording", "field", "ergonomic", "psychoactive", "relax",
+}
+
+
 class SoundScout:
     def __init__(self, device: str = "cuda"):
         self.device = device if torch.cuda.is_available() and device == "cuda" else "cpu"
@@ -109,8 +137,194 @@ class SoundScout:
         self.processor = ClapProcessor.from_pretrained(self.model_id)
         self.model = ClapModel.from_pretrained(self.model_id, use_safetensors=True).to(self.device).eval()
         self._audio_emb_cache: Dict[str, torch.Tensor] = {}
+        self._slot_emb_cache: Dict[str, Dict[str, Any]] = {}
         self._similar_history: Dict[str, Dict[str, Any]] = {}
+        self._neg_speech_emb = self.compute_text_embedding([
+            "human speaking voice talking narration conversation podcast",
+            "people talking crowd speech chatter vocals",
+        ])
+        self._neg_tone_emb = self.compute_text_embedding([
+            "annoying continuous high pitched sine wave beep test tone oscillator",
+            "harsh static white noise hiss buzz calibration tone",
+        ])
+        self._neg_music_emb = self.compute_text_embedding([
+            "background music song melody chords piano soundtrack",
+        ])
         print("[SoundScout] CLAP Model ready.")
+
+    def _get_effective_max_duration(
+        self,
+        slot: Dict[str, Any],
+        explicit_max_dur: Optional[float] = None,
+        ref_dur: Optional[float] = None,
+    ) -> float:
+        """Computes a sane maximum duration ceiling so 5-minute tracks never leak into SFX queues."""
+        if explicit_max_dur and explicit_max_dur > 0:
+            return float(explicit_max_dur)
+        slot_max = float(slot.get("max_dur") or 3.0)
+        cat = str(slot.get("category") or "").lower()
+        if cat == "environment":
+            eff = min(25.0, max(12.0, slot_max * 4.0))
+        else:
+            eff = min(20.0, max(10.0, slot_max * 3.5))
+        if ref_dur and ref_dur > 0:
+            eff = min(eff, max(8.0, float(ref_dur) * 3.5))
+        return eff
+
+    def _is_metadata_blocked(self, item: Dict[str, Any], allow_voice: bool = False) -> Optional[str]:
+        """Rejects speech, continuous test tones/colored noise, sample packs & BGM by metadata."""
+        name = str(item.get("name") or "").lower()
+        tags = item.get("tags") or []
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags)
+            except Exception:
+                tags = [tags]
+        tags_str = " ".join(str(t).lower() for t in tags)
+        desc = str(item.get("description") or "").lower()
+        hay = f"{name} {tags_str} {desc}"
+
+        for kw in BAD_TONE_NOISE_TOKENS:
+            if kw in hay:
+                return f"metadata_tone:{kw}"
+        if not allow_voice:
+            for kw in BAD_SPEECH_TOKENS:
+                if kw in hay:
+                    return f"metadata_speech:{kw}"
+        for kw in BAD_MUSIC_TOKENS:
+            if kw in hay:
+                return f"metadata_music:{kw}"
+        return None
+
+    def _analyze_audio_artifact(self, file_path: str, allow_tonal: bool = False) -> Optional[str]:
+        """Detects silent, heavily clipped, or stationary continuous pure-sine beep test tones."""
+        try:
+            import numpy as np
+            y, sr = librosa.load(file_path, sr=22050, mono=True, duration=15.0)
+            if len(y) < int(0.03 * sr):
+                return "too_short"
+            abs_y = np.abs(y)
+            peak = float(np.max(abs_y))
+            if peak < 1e-4:
+                return "silence"
+            clip_ratio = float(np.mean(abs_y >= 0.995))
+            if clip_ratio > 0.30:
+                return "heavy_clipping"
+
+            dur = len(y) / float(sr)
+            if dur >= 1.5 and len(y) >= 4096:
+                rms = librosa.feature.rms(y=y, frame_length=1024, hop_length=512)[0]
+                rms_mean = float(np.mean(rms))
+                rms_cv = float(np.std(rms) / (rms_mean + 1e-8))
+                S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
+                crest = float(np.mean(np.max(S, axis=0) / (np.mean(S, axis=0) + 1e-8)))
+                flat = float(np.median(librosa.feature.spectral_flatness(S=S + 1e-10)))
+                # Continuous flat single-frequency sine beep / calibration tone (no natural decay)
+                if not allow_tonal and crest > 45.0 and rms_cv < 0.16 and flat < 0.005:
+                    return "stationary_sine_beep"
+                # Extreme non-decaying continuous static/white/colored noise hiss over long span
+                if dur >= 8.0 and flat > 0.15 and rms_cv < 0.12:
+                    return "stationary_noise_hiss"
+        except Exception:
+            pass
+        return None
+
+    def _get_slot_embeddings(self, slot: Dict[str, Any]) -> Dict[str, Any]:
+        sid = str(slot.get("id") or "")
+        cached = self._slot_emb_cache.get(sid)
+        if cached is not None:
+            return cached
+        prompts = slot.get("clap_prompts") or []
+        if isinstance(prompts, str):
+            prompts = json.loads(prompts or "[]")
+        negs = slot.get("negative_prompts") or []
+        if isinstance(negs, str):
+            negs = json.loads(negs or "[]")
+        pos_emb = self.compute_text_embedding(list(prompts) + [str(slot.get("name") or "")], fallback_text="game sound effect")
+        neg_emb = self.compute_text_embedding(list(negs)) if negs else None
+        bundle = {"pos_emb": pos_emb, "neg_emb": neg_emb}
+        if sid:
+            self._slot_emb_cache[sid] = bundle
+        return bundle
+
+    def _evaluate_candidate_for_slot(
+        self,
+        snd: Dict[str, Any],
+        slot: Dict[str, Any],
+        target_emb: torch.Tensor,
+        pos_floor: float = 0.16,
+        ref_dur: Optional[float] = None,
+        explicit_max_dur: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Evaluates duration, metadata, DSP sanity, and contrastive CLAP quality against negatives."""
+        slot_id = str(slot.get("id") or "")
+        allow_voice = slot_id in VOICE_OK_SLOT_IDS
+        allow_tonal = slot_id in TONAL_OK_SLOT_IDS
+
+        dur = float(snd.get("duration") or 0.0)
+        eff_max_dur = self._get_effective_max_duration(slot, explicit_max_dur=explicit_max_dur, ref_dur=ref_dur)
+        if dur < 0.04 or dur > eff_max_dur:
+            return {"ok": False, "reason": "duration"}
+
+        meta_reason = self._is_metadata_blocked(snd, allow_voice=allow_voice)
+        if meta_reason:
+            return {"ok": False, "reason": meta_reason}
+
+        fp = snd.get("file_path")
+        if not fp or not Path(fp).exists():
+            return {"ok": False, "reason": "missing_file"}
+
+        dsp_reason = self._analyze_audio_artifact(fp, allow_tonal=allow_tonal)
+        if dsp_reason:
+            return {"ok": False, "reason": dsp_reason}
+
+        a_emb = self.compute_audio_embedding(fp)
+        if a_emb is None:
+            return {"ok": False, "reason": "embedding_failed"}
+
+        slot_embs = self._get_slot_embeddings(slot)
+        slot_pos_emb = slot_embs["pos_emb"]
+        slot_neg_emb = slot_embs["neg_emb"]
+
+        target_sim = float((a_emb @ target_emb.T).item())
+        slot_pos_sim = float((a_emb @ slot_pos_emb.T).item())
+        sp_sim = float((a_emb @ self._neg_speech_emb.T).item())
+        tn_sim = float((a_emb @ self._neg_tone_emb.T).item())
+        mu_sim = float((a_emb @ self._neg_music_emb.T).item())
+        sneg_sim = float((a_emb @ slot_neg_emb.T).item()) if slot_neg_emb is not None else 0.0
+
+        anchor_sim = max(target_sim, slot_pos_sim)
+        if target_sim < pos_floor or slot_pos_sim < (pos_floor - 0.04):
+            return {"ok": False, "reason": "low_similarity"}
+        if not allow_voice and sp_sim > 0.23 and sp_sim > anchor_sim - 0.05:
+            return {"ok": False, "reason": "speech_detected"}
+        if tn_sim > 0.22 and tn_sim > anchor_sim - 0.08:
+            return {"ok": False, "reason": "tone_or_noise_detected"}
+        if mu_sim > 0.20 and mu_sim > anchor_sim - 0.04:
+            return {"ok": False, "reason": "music_detected"}
+        if slot_neg_emb is not None and sneg_sim > 0.26 and sneg_sim > slot_pos_sim + 0.04:
+            return {"ok": False, "reason": "slot_negative_match"}
+
+        slot_min = float(slot.get("min_dur") or 0.1)
+        slot_max = float(slot.get("max_dur") or 3.0)
+        if slot_min * 0.8 <= dur <= slot_max * 1.15:
+            dur_bonus = 0.06
+        elif dur <= slot_max * 2.0:
+            dur_bonus = 0.02
+        elif dur > slot_max * 2.5:
+            dur_bonus = -0.04
+        else:
+            dur_bonus = 0.0
+
+        final_score = (
+            target_sim
+            - (0.0 if allow_voice else 0.35 * max(0.0, sp_sim - 0.14))
+            - 0.45 * max(0.0, tn_sim - 0.14)
+            - 0.30 * max(0.0, mu_sim - 0.15)
+            - 0.20 * max(0.0, sneg_sim - slot_pos_sim * 0.88)
+            + dur_bonus
+        )
+        return {"ok": True, "score": float(final_score), "raw_sim": target_sim, "slot_sim": slot_pos_sim}
 
     def search_lotsofsounds(self, query: str, limit: int = 12) -> List[Dict[str, Any]]:
         """Queries the LotsOfSounds no-key CC0 API and returns sound items."""
@@ -407,20 +621,33 @@ class SoundScout:
         }
 
     def compute_audio_embedding(self, file_path: str) -> Optional[torch.Tensor]:
-        """Loads audio (up to 10s) and returns normalized CLAP audio embedding (cached in memory)."""
+        """Loads audio (multi-window up to 25s) and returns normalized CLAP audio embedding."""
         key = str(file_path)
         if key in self._audio_emb_cache:
             return self._audio_emb_cache[key]
         try:
-            audio, _ = librosa.load(file_path, sr=48000, mono=True, duration=10.0)
+            audio, _ = librosa.load(file_path, sr=48000, mono=True, duration=25.0)
             if len(audio) == 0:
                 return None
-            inputs = self.processor(audio=audio, sampling_rate=48000, return_tensors="pt").to(self.device)
-            with torch.no_grad():
-                emb = self.model.get_audio_features(**inputs)
-                emb = emb / emb.norm(dim=-1, keepdim=True)
-            res = emb.cpu()
-            del inputs, emb
+            # Split into start + mid windows when longer than 10.5s so mid-track speech/noise is heard
+            win_samples = int(10.0 * 48000)
+            if len(audio) > int(10.5 * 48000):
+                mid_start = max(0, (len(audio) - win_samples) // 2)
+                chunks = [audio[:win_samples], audio[mid_start : mid_start + win_samples]]
+            else:
+                chunks = [audio]
+
+            embs = []
+            for ch in chunks:
+                inputs = self.processor(audio=ch, sampling_rate=48000, return_tensors="pt").to(self.device)
+                with torch.no_grad():
+                    e = self.model.get_audio_features(**inputs)
+                    e = e / e.norm(dim=-1, keepdim=True)
+                embs.append(e.cpu())
+                del inputs, e
+
+            res = embs[0] if len(embs) == 1 else torch.mean(torch.cat(embs, dim=0), dim=0, keepdim=True)
+            res = res / res.norm(dim=-1, keepdim=True)
             self._audio_emb_cache[key] = res
             return res
         except Exception as e:
@@ -471,8 +698,10 @@ class SoundScout:
 
         search_tags = custom_search_tags if custom_search_tags else json.loads(slot.get("search_tags") or "[]")
         clap_prompts = custom_clap_prompts if custom_clap_prompts else json.loads(slot.get("clap_prompts") or "[]")
+        eff_max_dur = self._get_effective_max_duration(slot, explicit_max_dur=max_duration)
+        allow_voice = slot_id in VOICE_OK_SLOT_IDS
 
-        # 1. Search across tags (LotsOfSounds + optional Freesound CC0 multi-page, skipping deleted IDs)
+        # 1. Search across tags (LotsOfSounds + optional Freesound CC0, pre-filtering long/bad metadata!)
         raw_los = []
         raw_fs = []
         seen_ids = set(skipped_ids)
@@ -481,16 +710,21 @@ class SoundScout:
             for item in items:
                 if item["id"] in seen_ids:
                     continue
-                if max_duration and max_duration > 0 and item["duration"] > max_duration:
+                item_dur = float(item.get("duration") or 0.0)
+                if item_dur < 0.04 or item_dur > eff_max_dur:
+                    continue
+                if self._is_metadata_blocked(item, allow_voice=allow_voice):
                     continue
                 seen_ids.add(item["id"])
                 raw_los.append(item)
             if include_freesound:
-                fs_dur_cap = max_duration if (max_duration and max_duration > 0) else 45.0
                 for fs_item in self.search_freesound(tag, pages=1, cc0_only=True):
                     if fs_item["id"] in seen_ids:
                         continue
-                    if (fs_item.get("duration") or 0.0) > fs_dur_cap:
+                    fs_dur = float(fs_item.get("duration") or 0.0)
+                    if fs_dur < 0.04 or fs_dur > eff_max_dur:
+                        continue
+                    if self._is_metadata_blocked(fs_item, allow_voice=allow_voice):
                         continue
                     seen_ids.add(fs_item["id"])
                     raw_fs.append(fs_item)
@@ -499,7 +733,7 @@ class SoundScout:
         if not raw_los and not raw_fs:
             return 0
 
-        # 2. Download concurrently and compute loudness + CLAP embeddings
+        # 2. Download concurrently and apply full quality + contrastive CLAP gate
         downloaded_sounds = []
         with ThreadPoolExecutor(max_workers=10) as pool:
             if raw_los:
@@ -514,20 +748,23 @@ class SoundScout:
         if not downloaded_sounds:
             return 0
 
-        text_emb = self.compute_text_embedding(clap_prompts, fallback_text=slot.get("name") or "sound effect")
+        target_emb = (
+            self.compute_text_embedding(clap_prompts, fallback_text=slot.get("name") or "sound effect")
+            if custom_clap_prompts
+            else self._get_slot_embeddings(slot)["pos_emb"]
+        )
         scored_candidates = []
         for snd in downloaded_sounds:
             if snd["id"] in skipped_ids:
                 continue
-            if max_duration and max_duration > 0 and snd.get("duration", 0.0) > max_duration:
+            ev = self._evaluate_candidate_for_slot(
+                snd, slot, target_emb, pos_floor=0.17, explicit_max_dur=max_duration
+            )
+            if not ev["ok"]:
                 continue
-            audio_emb = self.compute_audio_embedding(snd["file_path"])
-            if audio_emb is None:
-                continue
-            cos_sim = (audio_emb @ text_emb.T).item()
             scored_candidates.append({
                 "sound": snd,
-                "score": float(cos_sim),
+                "score": ev["score"],
             })
 
         scored_candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -613,21 +850,28 @@ class SoundScout:
             slot_row = c.fetchone()
             if not slot_row:
                 return {"added_count": 0, "matched_ids": [], "queries": []}
+            slot = dict(slot_row)
             c.execute("SELECT sound_id FROM slot_candidates WHERE slot_id = ? AND status = 'skipped'", (slot_id,))
             skipped_ids = {r["sound_id"] for r in c.fetchall()}
             c.execute("SELECT * FROM sounds")
             local_pool = [dict(r) for r in c.fetchall()]
 
+        allow_voice = slot_id in VOICE_OK_SLOT_IDS
+        allow_tonal = slot_id in TONAL_OK_SLOT_IDS
+        dur_cap = float(max_duration) if (max_duration and max_duration > 0) else 25.0
         query_tokens = [t.lower() for t in terms if len(t) >= 2] or [search_str.lower()]
         seen_ids = set(skipped_ids)
         ready_sounds: List[Dict[str, Any]] = []
 
-        # 1. Local cache name/tag matches first (instant)
+        # 1. Local cache name/tag matches first (instant, quality-checked)
         for p in local_pool:
             pid = p["id"]
             if pid in seen_ids:
                 continue
-            if max_duration and max_duration > 0 and (p.get("duration") or 0.0) > max_duration:
+            pdur = float(p.get("duration") or 0.0)
+            if pdur < 0.04 or pdur > dur_cap:
+                continue
+            if self._is_metadata_blocked(p, allow_voice=allow_voice):
                 continue
             fp = p.get("file_path")
             if not fp or not Path(fp).exists():
@@ -637,20 +881,23 @@ class SoundScout:
                 seen_ids.add(pid)
                 ready_sounds.append({**p, "from_local_pool": True})
 
-        # 2. Online LotsOfSounds + Freesound CC0 (smart paging: only query extra terms if primary is sparse)
+        # 2. Online LotsOfSounds + Freesound CC0 (smart paging + metadata & duration hygiene)
         raw_los: List[Dict[str, Any]] = []
         raw_fs: List[Dict[str, Any]] = []
-        dur_cap = max_duration if (max_duration and max_duration > 0) else 45.0
         queries_tried = [search_str]
         for item in self.search_lotsofsounds(search_str, limit=12):
             sid = item.get("id")
-            if not sid or sid in seen_ids or item.get("duration", 0.0) > dur_cap:
+            if not sid or sid in seen_ids or float(item.get("duration") or 0.0) > dur_cap:
+                continue
+            if self._is_metadata_blocked(item, allow_voice=allow_voice):
                 continue
             seen_ids.add(sid)
             raw_los.append(item)
         for fs_item in self.search_freesound(search_str, pages=1, cc0_only=True):
             sid = fs_item.get("id")
-            if not sid or sid in seen_ids or fs_item.get("duration", 0.0) > dur_cap:
+            if not sid or sid in seen_ids or float(fs_item.get("duration") or 0.0) > dur_cap:
+                continue
+            if self._is_metadata_blocked(fs_item, allow_voice=allow_voice):
                 continue
             seen_ids.add(sid)
             raw_fs.append(fs_item)
@@ -660,13 +907,17 @@ class SoundScout:
                 queries_tried.append(q)
                 for item in self.search_lotsofsounds(q, limit=12):
                     sid = item.get("id")
-                    if not sid or sid in seen_ids or item.get("duration", 0.0) > dur_cap:
+                    if not sid or sid in seen_ids or float(item.get("duration") or 0.0) > dur_cap:
+                        continue
+                    if self._is_metadata_blocked(item, allow_voice=allow_voice):
                         continue
                     seen_ids.add(sid)
                     raw_los.append(item)
                 for fs_item in self.search_freesound(q, pages=1, cc0_only=True):
                     sid = fs_item.get("id")
-                    if not sid or sid in seen_ids or fs_item.get("duration", 0.0) > dur_cap:
+                    if not sid or sid in seen_ids or float(fs_item.get("duration") or 0.0) > dur_cap:
+                        continue
+                    if self._is_metadata_blocked(fs_item, allow_voice=allow_voice):
                         continue
                     seen_ids.add(sid)
                     raw_fs.append(fs_item)
@@ -685,17 +936,42 @@ class SoundScout:
                     if dl:
                         ready_sounds.append(dl)
 
-        # Score against user query text with CLAP so closest results sit on top
+        # Score against user query text with contrastive speech/tone/music rejection
         text_emb = self.compute_text_embedding([search_str] + terms, fallback_text=search_str)
         scored: List[Dict[str, Any]] = []
+        filtered_out = 0
         for snd in ready_sounds:
             if snd["id"] in skipped_ids:
                 continue
-            if max_duration and max_duration > 0 and (snd.get("duration") or 0.0) > max_duration:
+            sdur = float(snd.get("duration") or 0.0)
+            if sdur < 0.04 or sdur > dur_cap:
+                filtered_out += 1
+                continue
+            if self._analyze_audio_artifact(snd["file_path"], allow_tonal=allow_tonal):
+                filtered_out += 1
                 continue
             a_emb = self.compute_audio_embedding(snd["file_path"])
-            sim = float((a_emb @ text_emb.T).item()) if a_emb is not None else 0.5
-            scored.append({"sound": snd, "score": sim})
+            if a_emb is None:
+                filtered_out += 1
+                continue
+            q_sim = float((a_emb @ text_emb.T).item())
+            sp_sim = float((a_emb @ self._neg_speech_emb.T).item())
+            tn_sim = float((a_emb @ self._neg_tone_emb.T).item())
+            mu_sim = float((a_emb @ self._neg_music_emb.T).item())
+            if q_sim < 0.14:
+                filtered_out += 1
+                continue
+            if not allow_voice and sp_sim > 0.24 and sp_sim > q_sim - 0.04:
+                filtered_out += 1
+                continue
+            if tn_sim > 0.23 and tn_sim > q_sim - 0.07:
+                filtered_out += 1
+                continue
+            if mu_sim > 0.22 and mu_sim > q_sim - 0.03:
+                filtered_out += 1
+                continue
+            final_q = q_sim - (0.0 if allow_voice else 0.30 * max(0.0, sp_sim - 0.15)) - 0.40 * max(0.0, tn_sim - 0.15) - 0.25 * max(0.0, mu_sim - 0.16)
+            scored.append({"sound": snd, "score": float(final_q)})
         scored.sort(key=lambda x: x["score"], reverse=True)
         scored = scored[:limit]
 
@@ -764,6 +1040,7 @@ class SoundScout:
 
         return {
             "added_count": len(matched_ids),
+            "filtered_out": filtered_out,
             "matched_ids": matched_ids,
             "queries": queries_tried,
             "first_sound_id": matched_ids[0] if matched_ids else None,
@@ -867,15 +1144,18 @@ class SoundScout:
             c.execute("SELECT * FROM sounds WHERE id = ?", (reference_sound_id,))
             ref_row = c.fetchone()
             if not ref_row:
-                return {"found_new": 0, "total_ranked": 0, "top_similar_index": 0, "queries_used": [], "round_no": round_no}
+                return {"found_new": 0, "total_ranked": 0, "top_similar_index": 0, "queries_used": [], "round_no": round_no, "filtered_out": 0}
             ref_snd = dict(ref_row)
 
-            c.execute("SELECT search_tags FROM slots WHERE id = ?", (slot_id,))
+            c.execute("SELECT * FROM slots WHERE id = ?", (slot_id,))
             slot_row = c.fetchone()
-            slot_tags = json.loads((slot_row["search_tags"] if slot_row else None) or "[]")
+            if not slot_row:
+                return {"found_new": 0, "total_ranked": 0, "top_similar_index": 0, "queries_used": [], "round_no": round_no, "filtered_out": 0}
+            slot = dict(slot_row)
+            slot_tags = json.loads(slot.get("search_tags") or "[]")
 
             c.execute("""
-            SELECT sc.id as cand_row_id, sc.sound_id, sc.status, snd.file_path, snd.name, snd.duration
+            SELECT sc.id as cand_row_id, sc.sound_id, sc.status, snd.file_path, snd.name, snd.duration, snd.tags
             FROM slot_candidates sc
             JOIN sounds snd ON sc.sound_id = snd.id
             WHERE sc.slot_id = ?
@@ -884,63 +1164,84 @@ class SoundScout:
 
         skipped_ids = {r["sound_id"] for r in all_slot_rows if r["status"] == "skipped"}
         existing_rows = [r for r in all_slot_rows if r["status"] != "skipped"]
+        ref_dur = float(ref_snd.get("duration") or 0.0)
+        eff_max_dur = self._get_effective_max_duration(slot, explicit_max_dur=max_duration, ref_dur=ref_dur)
+        allow_voice = slot_id in VOICE_OK_SLOT_IDS
 
-        # 1. Build Target Embedding (Audio-to-Audio, or Hybrid Audio + User Prompt Text)
+        # 1. Build Slot-Anchored Target Embedding (Prevents Acoustic Drift to Off-Topic Noise)
+        slot_pos_emb = self._get_slot_embeddings(slot)["pos_emb"]
         ref_emb = None
         if ref_snd.get("file_path") and Path(ref_snd["file_path"]).exists():
             ref_emb = self.compute_audio_embedding(ref_snd["file_path"])
         ref_tags = json.loads(ref_snd.get("tags") or "[]")
         if ref_emb is None:
-            ref_emb = self.compute_text_embedding([ref_snd.get("name", "")] + ref_tags, fallback_text="game sound effect")
+            ref_emb = self.compute_text_embedding([ref_snd.get("name", "")] + ref_tags, fallback_text=slot.get("name") or "game sound effect")
 
         prompt_terms = _extract_english_prompt_terms(custom_prompt or "")
         if prompt_terms:
             prompt_phrase = " ".join(prompt_terms)
             prompt_emb = self.compute_text_embedding([prompt_phrase, f"{prompt_phrase} sound effect"], fallback_text=prompt_phrase)
-            target_emb = 0.55 * ref_emb + 0.45 * prompt_emb
+            target_emb = 0.45 * ref_emb + 0.40 * prompt_emb + 0.15 * slot_pos_emb
             target_emb = target_emb / target_emb.norm(dim=-1, keepdim=True)
         else:
-            target_emb = ref_emb
+            target_emb = 0.72 * ref_emb + 0.28 * slot_pos_emb
+            target_emb = target_emb / target_emb.norm(dim=-1, keepdim=True)
 
-        # 2. Build diversified query pool & rotate untried queries across rounds
-        stop_words = {"sound", "audio", "sfx", "effect", "effects", "tags", "tag", "cc0", "freesound", "loop", "file", "noise"}
+        # 2. Build CLEAN domain-anchored query pool (never query bare generic adjectives/verbs!)
         candidate_pool: List[str] = []
+        core_slot_nouns = [str(st).strip().lower() for st in slot_tags if str(st).strip()]
+        primary_noun = core_slot_nouns[0] if core_slot_nouns else "sfx"
 
-        # Priority A: User prompt keywords (combined & individual)
+        # Priority A: User prompt paired with slot noun + full prompt phrase
         if prompt_terms:
             if len(prompt_terms) >= 2:
-                candidate_pool.append(" ".join(prompt_terms[:2]))
-            for pt in prompt_terms[:4]:
-                if pt not in candidate_pool:
+                candidate_pool.append(" ".join(prompt_terms[:3]))
+            for pt in prompt_terms[:3]:
+                if pt in GENERIC_SIMILAR_STOP_WORDS and primary_noun:
+                    paired = f"{pt} {primary_noun}"
+                    if paired not in candidate_pool:
+                        candidate_pool.append(paired)
+                elif pt not in candidate_pool:
                     candidate_pool.append(pt)
 
-        # Priority B: Reference sound tags & title keywords
+        # Priority B: Slot's own curated tags FIRST so searches stay firmly on-topic
+        for clean_st in core_slot_nouns:
+            if clean_st not in candidate_pool:
+                candidate_pool.append(clean_st)
+
+        # Priority C: Clean reference sound title phrase & non-generic tags
+        if ref_snd.get("name"):
+            name_tokens = [
+                w.strip().lower()
+                for w in str(ref_snd["name"]).replace("-", " ").replace("_", " ").split()
+                if len(w.strip()) >= 3 and w.strip().lower() not in GENERIC_SIMILAR_STOP_WORDS and not w.strip().isdigit()
+            ]
+            if name_tokens:
+                filtered_name = " ".join(name_tokens[:2])
+                if filtered_name not in candidate_pool:
+                    candidate_pool.append(filtered_name)
         for t in ref_tags:
             clean = str(t).strip().lower().replace("-", " ")
-            if len(clean) >= 3 and not clean.isdigit() and clean not in stop_words and clean not in candidate_pool:
+            if (
+                len(clean) >= 4
+                and not clean.isdigit()
+                and clean not in GENERIC_SIMILAR_STOP_WORDS
+                and all(part not in GENERIC_SIMILAR_STOP_WORDS for part in clean.split())
+                and clean not in candidate_pool
+            ):
                 candidate_pool.append(clean)
-        if ref_snd.get("name"):
-            name_tokens = [w.strip().lower() for w in str(ref_snd["name"]).replace("-", " ").split() if len(w.strip()) >= 3]
-            filtered_name = " ".join([w for w in name_tokens if w not in stop_words and not w.isdigit()][:2])
-            if filtered_name and filtered_name not in candidate_pool:
-                candidate_pool.append(filtered_name)
 
-        # Priority C: Synonym expansions so repeated clicks continue discovering fresh sounds
+        # Priority D: Synonym expansions anchored cleanly to sound nouns
         for base_word in list(candidate_pool):
             for tok in base_word.split():
+                if tok in GENERIC_SIMILAR_STOP_WORDS:
+                    continue
                 for syn in SFX_SYNONYM_MAP.get(tok, []):
                     if syn not in candidate_pool:
                         candidate_pool.append(syn)
 
-        # Priority D: Slot tags fallback
-        for st in slot_tags:
-            clean_st = str(st).strip().lower()
-            if clean_st and clean_st not in candidate_pool:
-                candidate_pool.append(clean_st)
-
         untried = [q for q in candidate_pool if q not in tried_queries]
         if not untried:
-            # Reset tried rotation when all synonyms cycled once, keeping prompt terms first
             tried_queries.clear()
             untried = candidate_pool
 
@@ -948,37 +1249,42 @@ class SoundScout:
         for q in queries:
             tried_queries.add(q)
 
-        # 3. Search LotsOfSounds online (+ Freesound CC0 if needed so every round discovers fresh candidates)
+        # 3. Search LotsOfSounds + Freesound CC0 with upfront duration & metadata hygiene gate
         existing_ids = {r["sound_id"] for r in all_slot_rows}
         seen_ids = set(existing_ids) | skipped_ids | {reference_sound_id}
         new_raw_items = []
         fs_raw_items = []
+        filtered_out = 0
         for q in queries:
             for item in self.search_lotsofsounds(q, limit=12):
                 sid = item.get("id")
                 if not sid or sid in seen_ids:
                     continue
-                if max_duration and max_duration > 0 and item.get("duration", 0.0) > max_duration:
+                idur = float(item.get("duration") or 0.0)
+                if idur < 0.04 or idur > eff_max_dur or self._is_metadata_blocked(item, allow_voice=allow_voice):
+                    filtered_out += 1
                     continue
                 seen_ids.add(sid)
                 new_raw_items.append(item)
-            time.sleep(0.03)
+            time.sleep(0.02)
 
-        if len(new_raw_items) < 6 and queries:
+        if len(new_raw_items) < 8 and queries:
             for fs_item in self.search_freesound(queries[0], pages=1, cc0_only=True):
                 sid = fs_item.get("id")
                 if not sid or sid in seen_ids:
                     continue
-                if max_duration and max_duration > 0 and fs_item.get("duration", 0.0) > max_duration:
+                fdur = float(fs_item.get("duration") or 0.0)
+                if fdur < 0.04 or fdur > eff_max_dur or self._is_metadata_blocked(fs_item, allow_voice=allow_voice):
+                    filtered_out += 1
                     continue
                 seen_ids.add(sid)
                 fs_raw_items.append(fs_item)
 
         downloaded_new = []
-        targets = new_raw_items[:6]
-        fs_targets = fs_raw_items[: max(0, 8 - len(targets))]
+        targets = new_raw_items[:8]
+        fs_targets = fs_raw_items[: max(0, 10 - len(targets))]
         if targets or fs_targets:
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            with ThreadPoolExecutor(max_workers=10) as pool:
                 if targets:
                     for dl in pool.map(self.download_sound, targets):
                         if dl:
@@ -988,14 +1294,16 @@ class SoundScout:
                         if dl:
                             downloaded_new.append(dl)
 
-        # 4. Score newly downloaded sounds + check local library cross-matches if online yields < 3
+        # 4. Evaluate newly downloaded sounds with FULL quality + contrastive CLAP gate
         scored_new = []
         for snd in downloaded_new:
-            a_emb = self.compute_audio_embedding(snd["file_path"])
-            if a_emb is None:
+            ev = self._evaluate_candidate_for_slot(
+                snd, slot, target_emb, pos_floor=0.18, ref_dur=ref_dur, explicit_max_dur=max_duration
+            )
+            if not ev["ok"]:
+                filtered_out += 1
                 continue
-            sim = float((a_emb @ target_emb.T).item())
-            scored_new.append({"sound": snd, "score": sim})
+            scored_new.append({"sound": snd, "score": ev["score"]})
 
         if len(scored_new) < 3:
             with get_db_context() as conn:
@@ -1007,32 +1315,25 @@ class SoundScout:
                 pid = p_row["id"]
                 if pid in seen_ids:
                     continue
-                if max_duration and max_duration > 0 and (p_row.get("duration") or 0.0) > max_duration:
+                ev = self._evaluate_candidate_for_slot(
+                    p_row, slot, target_emb, pos_floor=0.34, ref_dur=ref_dur, explicit_max_dur=max_duration
+                )
+                if not ev["ok"]:
                     continue
-                fp = p_row.get("file_path")
-                if not fp or not Path(fp).exists():
-                    continue
-                a_emb = self.compute_audio_embedding(fp)
-                if a_emb is None:
-                    continue
-                sim = float((a_emb @ target_emb.T).item())
-                if sim >= 0.45:
-                    local_matches.append({"sound": p_row, "score": sim, "from_local_pool": True})
+                local_matches.append({"sound": p_row, "score": ev["score"], "from_local_pool": True})
             local_matches.sort(key=lambda x: x["score"], reverse=True)
-            scored_new.extend(local_matches[: max(1, 4 - len(scored_new))])
+            scored_new.extend(local_matches[: max(1, 5 - len(scored_new))])
 
-        # Re-score existing active candidates in this slot against target_emb
+        # Re-score existing active candidates in this slot contrastively
         existing_scores: List[Dict[str, Any]] = []
         for ex in existing_rows:
             if ex["sound_id"] == reference_sound_id:
                 continue
-            sim = 0.5
-            fp = ex.get("file_path")
-            if fp and Path(fp).exists():
-                a_emb = self.compute_audio_embedding(fp)
-                if a_emb is not None:
-                    sim = float((a_emb @ target_emb.T).item())
-            existing_scores.append({"sound_id": ex["sound_id"], "score": sim})
+            ev = self._evaluate_candidate_for_slot(
+                ex, slot, target_emb, pos_floor=-1.0, ref_dur=ref_dur, explicit_max_dur=max_duration
+            )
+            score_val = ev["score"] if ev["ok"] else -0.5
+            existing_scores.append({"sound_id": ex["sound_id"], "score": score_val})
 
         # 5. Persist newly found sounds & update acoustic/prompt similarity ordering cleanly
         with get_db_context() as conn:
@@ -1090,11 +1391,53 @@ class SoundScout:
         return {
             "round_no": round_no,
             "found_new": len(scored_new),
+            "filtered_out": filtered_out,
             "total_ranked": total_ranked,
             "top_similar_index": 1 if total_ranked > 1 else 0,
             "queries_used": queries,
             "prompt_used": (custom_prompt or "").strip(),
         }
+
+    def cleanup_existing_bad_candidates(self) -> Dict[str, Any]:
+        """Moves existing pending (never liked/confirmed) bad, long, speech, or tone/noise rows to trash."""
+        moved_count = 0
+        reasons_count: Dict[str, int] = {}
+        with get_db_context() as conn:
+            c = conn.cursor()
+            c.execute("SELECT * FROM slots")
+            slots_map = {r["id"]: dict(r) for r in c.fetchall()}
+            c.execute("""
+            SELECT sc.id as cand_id, sc.slot_id, sc.sound_id, snd.*
+            FROM slot_candidates sc
+            JOIN sounds snd ON sc.sound_id = snd.id
+            WHERE sc.status = 'pending'
+            """)
+            pending_rows = [dict(r) for r in c.fetchall()]
+
+            to_skip_ids: List[int] = []
+            touched_slots = set()
+            for row in pending_rows:
+                slot = slots_map.get(row["slot_id"])
+                if not slot:
+                    continue
+                pos_emb = self._get_slot_embeddings(slot)["pos_emb"]
+                ev = self._evaluate_candidate_for_slot(row, slot, pos_emb, pos_floor=0.14)
+                if not ev["ok"]:
+                    to_skip_ids.append(row["cand_id"])
+                    touched_slots.add(row["slot_id"])
+                    rsn = ev["reason"].split(":")[0]
+                    reasons_count[rsn] = reasons_count.get(rsn, 0) + 1
+
+            for cid in to_skip_ids:
+                c.execute("UPDATE slot_candidates SET status = 'skipped' WHERE id = ?", (cid,))
+            moved_count = len(to_skip_ids)
+
+            for sid in touched_slots:
+                c.execute("SELECT COUNT(*) as cnt FROM slot_candidates WHERE slot_id = ? AND status != 'skipped'", (sid,))
+                if c.fetchone()["cnt"] == 0:
+                    c.execute("UPDATE slots SET status = 'pending', review_passed = 0 WHERE id = ? AND status != 'confirmed'", (sid,))
+            conn.commit()
+        return {"moved_to_trash": moved_count, "reasons": reasons_count}
 
     def scout_all_slots(self):
         with get_db_context() as conn:

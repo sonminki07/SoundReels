@@ -330,3 +330,26 @@
   - `verify_v22.py` 통과: `index.html`/`app.js` `v2.2` 토큰, `confirmCurrent` 타슬롯 점프 제거 확인, 삭제→삭제함→수동검색 재노출 방지→복구(`fs-556699`), `freesound.org/s/868295/` URL 1순위 추가 및 악성 도메인 `400` 차단, 팝업 브리지 & 대량 확보, `check_update` 및 DB 원복 완료
   - `test_v12.py` 회귀 테스트 전체 통과
 ================================================================================
+
+18. v2.3 검색/유사 탐색 품질 대개편: 5분 이상 장시간 음원·사람 말·삐익(테스트톤)·무관한 삑사리 다중 차단 및 DB 정화
+--------------------------------------------------------------------------------
+- 원인 분석:
+  1) `scout_slot` / `find_similar_to_sound`에 길이 상한(`slot.max_dur`) 및 최소 CLAP 점수 커트라인이 없어 `392.1s` 바람소리·`300.0s` 노이즈·음수(`-0.052`) 무관 음원이 그대로 유입됨
+  2) DB 각 슬롯의 `negative_prompts`가 검색/유사 랭킹에 전혀 반영되지 않았고, 사람 말(음성)·연속 테스트톤(삐익)/노이즈·BGM을 걸러내는 음향/메타 필터가 없었음
+  3) `find_similar_to_sound`가 `close`/`down`/`slowed` 같은 일반 단어를 단독 검색하고 첫 10초만 임베딩해 슬롯 주제에서 이탈하는 문제 발생
+- 구현 내역 (`sound_scout.py`, `main.py`, `index.html`, `app.js`):
+  1) 다중 품질 게이트 및 대조 CLAP 스코어링 (`SoundScout`):
+     - `_get_effective_max_duration`: 미입력 기본 상태에서 일반 슬롯 최대 `10~20초`(환경음 `25초`), 유사 탐색 시 기준음 대비 `3.5배` 상한 자동 적용
+     - `_is_metadata_blocked` + `_analyze_audio_artifact`: 사람 말/내레이션·Colored Noise/테스트톤·BGM 메타 차단 및 무음·클리핑·비감쇠 연속 단음(`stationary_sine_beep`)·장시간 백색잡음(`stationary_noise_hiss`) DSP 차단
+     - `compute_audio_embedding`: 10초 초과 음원은 앞·중간 구간 다중 윈도우 임베딩 평균 적용
+     - `_evaluate_candidate_for_slot`: 전역 음성/톤/음악 네거티브 임베딩 + 슬롯 `negative_prompts` 대조 감점/차단, 최소 유사도(`>=0.14~0.18`) 미달 컷, 권장 길이 적합도 보너스 적용
+  2) 슬롯 앵커 유사 탐색 & 정제 쿼리 (`find_similar_to_sound`):
+     - 기준 음색(`0.72` / 프롬프트 시 `0.45`) + 슬롯 앵커(`0.28` / `0.15`) 혼합 및 일반 단어(`GENERIC_SIMILAR_STOP_WORDS`) 단독 검색 제거
+     - `filtered_out` 카운트를 UI `#similarStatusBanner`에 표시 (`불량/초과 N개 제외`)
+  3) 기존 DB 미찜 불량 후보 정화 (`POST /api/system/cleanup_quality`):
+     - `liked`/`confirmed`는 100% 보존하고 기존 `pending` 불량/장시간 후보 99건을 `삭제함(skipped)`으로 이동한 뒤, 부족 슬롯 11개를 고품질 기준으로 재탐색 보충(`8~21개`)
+- 검증 결과 (QA 통과):
+  - `node --check backend/app/static/app.js` 및 Python `py_compile` 오류 0건
+  - `verify_v23.py` 통과: 1kHz 연속 비프/무음 DSP 차단 및 실제 찜 종소리 통과, DB 정화(99건 이동, `liked=13`/`confirmed=4` 보존, 25.5초 초과 미찜 0건), 유사 탐색 결과 최대 `3.8s` 이내 클린 후보 확인
+  - `test_v12.py` 회귀 테스트 전체 통과
+================================================================================
