@@ -334,14 +334,14 @@ class SoundScout:
             filtered_name = " ".join([w for w in name_tokens if w not in stop_words and not w.isdigit()][:3])
             if filtered_name and filtered_name not in queries:
                 queries.insert(0, filtered_name)
-        queries = queries[:3]
+        queries = queries[:2]
 
         # 3. Search LotsOfSounds online for fresh acoustically similar sounds
         existing_ids = {r["sound_id"] for r in existing_rows}
         seen_ids = set(existing_ids) | {reference_sound_id}
         new_raw_items = []
         for q in queries:
-            for item in self.search_lotsofsounds(q, limit=8):
+            for item in self.search_lotsofsounds(q, limit=6):
                 sid = item.get("id")
                 if not sid or sid in seen_ids:
                     continue
@@ -349,13 +349,16 @@ class SoundScout:
                     continue
                 seen_ids.add(sid)
                 new_raw_items.append(item)
-            time.sleep(0.05)
+            time.sleep(0.03)
 
         downloaded_new = []
-        for raw in new_raw_items[:12]:
-            dl = self.download_sound(raw)
-            if dl:
-                downloaded_new.append(dl)
+        targets = new_raw_items[:5]
+        if targets:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for dl in pool.map(self.download_sound, targets):
+                    if dl:
+                        downloaded_new.append(dl)
 
         # 4. Score BOTH newly downloaded sounds and existing slot sounds by audio-to-audio CLAP similarity
         scored_new = []
