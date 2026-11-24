@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SoundReels — Game SFX Explorer</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="style.css?v=1.21">
+  <link rel="stylesheet" href="style.css?v=1.22">
 </head>
 <body class="bg-[#121212] text-white select-none h-screen flex flex-col overflow-hidden font-sans">
 
@@ -41,8 +41,8 @@
   <!-- MAIN VIEWPORT -->
   <div class="flex flex-1 overflow-hidden relative">
 
-    <!-- LEFT PANEL (Expandable / Flexible) -->
-    <aside id="leftPanel" class="w-64 bg-[#181818] border-r border-[#282828] p-4 flex flex-col space-y-4 shrink-0 transition-all duration-300">
+    <!-- LEFT PANEL (Resizable) -->
+    <aside id="leftPanel" style="width: 240px; min-width: 150px; max-width: 460px;" class="bg-[#181818] border-r border-[#282828] p-4 flex flex-col space-y-4 shrink-0 overflow-hidden">
       <div class="flex items-center justify-between pb-2 border-b border-[#282828]">
         <h3 class="text-xs font-bold uppercase tracking-wider text-gray-400">카테고리 필터</h3>
         <span id="totalSlotsCount" class="text-xs text-[#1DB954] font-mono">30 Slots</span>
@@ -71,6 +71,9 @@
         <p>LotsOfSounds 무인증 CC0 사운드 및 로컬 절차적 생성 음원만 대기열에 노출됩니다.</p>
       </div>
     </aside>
+
+    <!-- LEFT RESIZER -->
+    <div id="leftResizer" class="resizer-v" title="드래그하여 좌측 패널 크기 조절"></div>
 
     <!-- CENTER CANVAS (Scene Screen + Menu + Control Bar + Waveform Trimmer) -->
     <main class="flex-1 flex flex-col items-center justify-between px-6 py-3 gap-2.5 relative overflow-y-auto bg-gradient-to-b from-[#1e1e1e] to-[#121212]">
@@ -207,26 +210,35 @@
         </button>
       </div>
 
-      <!-- 3. 컨트롤 바 + 하단 오디오 파형 트리머 (Transport & Waveform Trimmer) -->
+      <!-- 3. 컨트롤 바 + 하단 오디오 파형 트리머 (Transport, Master Volume & Waveform) -->
       <div id="controlBar" class="w-full max-w-2xl bg-[#181818]/90 backdrop-blur border border-[#2a2a2a] rounded-xl px-5 py-3 flex flex-col space-y-2 z-10 shadow-lg shrink-0">
-        <div class="flex items-center justify-center space-x-5">
-          <button id="btnPrev" title="이전 사운드 (↑ / K)" class="text-gray-400 hover:text-white transition">
-            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M8.445 14.832A1 1 0 0010 14v-2.798l5.445 3.63A1 1 0 0017 14V6a1 1 0 00-1.555-.832L10 8.798V6a1 1 0 00-1.555-.832l-6 4a1 1 0 000 1.664l6 4z"></path></svg>
-          </button>
-          
-          <button id="btnPlay" title="재생 / 일시정지 (Space)" class="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 active:scale-95 transition shadow-lg">
-            <svg id="playIcon" class="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg>
-            <svg id="pauseIcon" class="w-5 h-5 hidden" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path></svg>
-          </button>
-
-          <button id="btnNext" title="다음 사운드로 넘기기 (↓ / J)" class="text-gray-400 hover:text-white transition">
-            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M4.555 5.168A1 1 0 003 6v8a1 1 0 001.555.832L10 11.202V14a1 1 0 001.555.832l6-4a1 1 0 000-1.664l-6-4A1 1 0 0010 6v2.798L4.555 5.168z"></path></svg>
-          </button>
-
+        <div class="flex items-center justify-between gap-2">
           <button id="btnLoopMode" title="반복 모드 전환 (L): 장면+소리 싱크 / 소리만 / 1회 후 다음"
-            class="px-3 py-1 rounded-full bg-[#242424] hover:bg-[#303030] border border-[#3a3a3a] text-emerald-400 transition text-xs font-mono font-bold">
+            class="px-3 py-1 rounded-full bg-[#242424] hover:bg-[#303030] border border-[#3a3a3a] text-emerald-400 transition text-xs font-mono font-bold shrink-0">
             🔁 🎬+🔊 싱크 반복
           </button>
+
+          <div class="flex items-center justify-center space-x-5">
+            <button id="btnPrev" title="이전 사운드 (↑ / K)" class="text-gray-400 hover:text-white transition">
+              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M8.445 14.832A1 1 0 0010 14v-2.798l5.445 3.63A1 1 0 0017 14V6a1 1 0 00-1.555-.832L10 8.798V6a1 1 0 00-1.555-.832l-6 4a1 1 0 000 1.664l6 4z"></path></svg>
+            </button>
+            
+            <button id="btnPlay" title="재생 / 일시정지 (Space)" class="w-9 h-9 rounded-full bg-white text-black flex items-center justify-center hover:scale-105 active:scale-95 transition shadow-lg">
+              <svg id="playIcon" class="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"></path></svg>
+              <svg id="pauseIcon" class="w-5 h-5 hidden" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"></path></svg>
+            </button>
+
+            <button id="btnNext" title="다음 사운드로 넘기기 (↓ / J)" class="text-gray-400 hover:text-white transition">
+              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M4.555 5.168A1 1 0 003 6v8a1 1 0 001.555.832L10 11.202V14a1 1 0 001.555.832l6-4a1 1 0 000-1.664l-6-4A1 1 0 0010 6v2.798L4.555 5.168z"></path></svg>
+            </button>
+          </div>
+
+          <!-- Master Volume Slider -->
+          <div class="flex items-center gap-1.5 shrink-0" title="전체 사운드 마스터 볼륨 조절">
+            <button id="btnMute" class="text-gray-300 hover:text-white text-sm w-5 text-center leading-none">🔉</button>
+            <input id="volumeSlider" type="range" min="0" max="100" value="40" class="w-20 accent-[#1DB954] cursor-pointer h-1 bg-[#333] rounded-lg">
+            <span id="volumeLabel" class="text-[11px] font-mono text-gray-400 w-8 text-right">40%</span>
+          </div>
         </div>
 
         <!-- Time Slider -->
@@ -268,8 +280,11 @@
       </div>
     </main>
 
-    <!-- RIGHT PANEL: 28 SLOTS CHECKLIST & CANDIDATE QUEUE -->
-    <aside class="w-80 bg-[#181818] border-l border-[#282828] flex flex-col shrink-0">
+    <!-- RIGHT RESIZER -->
+    <div id="rightResizer" class="resizer-v" title="드래그하여 우측 리스트 패널 크기 조절"></div>
+
+    <!-- RIGHT PANEL: 28 SLOTS CHECKLIST & CANDIDATE QUEUE (Resizable) -->
+    <aside id="rightPanel" style="width: 320px; min-width: 220px; max-width: 580px;" class="bg-[#181818] border-l border-[#282828] flex flex-col shrink-0 overflow-hidden">
       <!-- Tabs -->
       <div class="flex border-b border-[#282828] text-xs font-bold text-center">
         <button id="tabSlotsBtn" class="flex-1 py-3 border-b-2 border-[#1DB954] text-white">사운드 슬롯 (30)</button>
@@ -299,8 +314,11 @@
     </aside>
   </div>
 
-  <!-- BOTTOM DOCK: [1] [2] [3] [4] [5] QUICK COMPARE & UNITY EXPORT BAR (Sketch Reflect) -->
-  <footer class="h-16 bg-[#000000] border-t border-[#282828] px-6 flex items-center justify-between shrink-0 z-20">
+  <!-- BOTTOM RESIZER -->
+  <div id="bottomResizer" class="resizer-h" title="드래그하여 하단 영역 높이 조절"></div>
+
+  <!-- BOTTOM DOCK: [1] [2] [3] [4] [5] QUICK COMPARE & UNITY EXPORT BAR (Resizable) -->
+  <footer id="bottomFooter" style="height: 68px; min-height: 54px; max-height: 220px;" class="bg-[#000000] border-t border-[#282828] px-6 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0 z-20 overflow-y-auto">
     <!-- Quick Compare Dock [1~5] -->
     <div class="flex items-center space-x-2">
       <span class="text-[11px] font-bold text-gray-400 mr-1 uppercase font-mono">비교 독:</span>
@@ -341,6 +359,6 @@
   <!-- Hidden Native Audio Element -->
   <audio id="audioPlayer"></audio>
 
-  <script src="app.js?v=1.21"></script>
+  <script src="app.js?v=1.22"></script>
 </body>
 </html>

@@ -95,6 +95,46 @@ const btnScenePlayPause = document.getElementById("btnScenePlayPause");
 
 let isDraggingSceneHandle = null; // 'in' | 'out' | 'scrub' | null
 
+const btnMute = document.getElementById("btnMute");
+const volumeSlider = document.getElementById("volumeSlider");
+const volumeLabel = document.getElementById("volumeLabel");
+
+// Master Volume (Default 40% to protect ears; persisted in localStorage)
+let masterVolume = parseFloat(localStorage.getItem("soundreels_volume"));
+if (Number.isNaN(masterVolume)) masterVolume = 0.4;
+masterVolume = Math.max(0, Math.min(1, masterVolume));
+let preMuteVolume = masterVolume > 0 ? masterVolume : 0.4;
+
+function applyMasterVolume(vol) {
+  masterVolume = Math.max(0, Math.min(1, vol));
+  audioPlayer.volume = masterVolume;
+  const pct = Math.round(masterVolume * 100);
+  volumeSlider.value = pct;
+  volumeLabel.textContent = `${pct}%`;
+  if (masterVolume === 0) btnMute.textContent = "🔇";
+  else if (masterVolume < 0.35) btnMute.textContent = "🔈";
+  else if (masterVolume < 0.7) btnMute.textContent = "🔉";
+  else btnMute.textContent = "🔊";
+  localStorage.setItem("soundreels_volume", masterVolume.toFixed(2));
+}
+
+applyMasterVolume(masterVolume);
+
+volumeSlider.addEventListener("input", () => {
+  const v = parseInt(volumeSlider.value, 10) / 100;
+  if (v > 0) preMuteVolume = v;
+  applyMasterVolume(v);
+});
+
+btnMute.addEventListener("click", () => {
+  if (masterVolume > 0) {
+    preMuteVolume = masterVolume;
+    applyMasterVolume(0);
+  } else {
+    applyMasterVolume(preMuteVolume > 0 ? preMuteVolume : 0.4);
+  }
+});
+
 const unityPathInput = document.getElementById("unityPathInput");
 
 if (localStorage.getItem("soundreels_unity_path")) {
@@ -1498,8 +1538,90 @@ document.getElementById("tabCandidatesBtn").addEventListener("click", () => {
 });
 
 document.getElementById("toggleLeftBtn").addEventListener("click", () => {
-  document.getElementById("leftPanel").classList.toggle("hidden");
+  const isHidden = document.getElementById("leftPanel").classList.toggle("hidden");
+  document.getElementById("leftResizer").classList.toggle("hidden", isHidden);
+  setTimeout(resizeWaveformCanvas, 20);
 });
+
+// =========================================================================
+// Resizable Panels (Left, Right, Bottom Footer)
+// =========================================================================
+
+function initResizers() {
+  const leftPanel = document.getElementById("leftPanel");
+  const rightPanel = document.getElementById("rightPanel");
+  const bottomFooter = document.getElementById("bottomFooter");
+  const leftResizer = document.getElementById("leftResizer");
+  const rightResizer = document.getElementById("rightResizer");
+  const bottomResizer = document.getElementById("bottomResizer");
+
+  // Restore saved sizes
+  const savedLeft = localStorage.getItem("soundreels_left_width");
+  if (savedLeft) leftPanel.style.width = `${savedLeft}px`;
+  const savedRight = localStorage.getItem("soundreels_right_width");
+  if (savedRight) rightPanel.style.width = `${savedRight}px`;
+  const savedBottom = localStorage.getItem("soundreels_footer_height");
+  if (savedBottom) bottomFooter.style.height = `${savedBottom}px`;
+
+  let activeResizer = null; // 'left' | 'right' | 'bottom' | null
+
+  leftResizer.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    activeResizer = "left";
+    leftResizer.classList.add("active");
+    document.body.classList.add("resizing");
+  });
+
+  rightResizer.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    activeResizer = "right";
+    rightResizer.classList.add("active");
+    document.body.classList.add("resizing");
+  });
+
+  bottomResizer.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    activeResizer = "bottom";
+    bottomResizer.classList.add("active");
+    document.body.classList.add("resizing");
+  });
+
+  window.addEventListener("pointermove", (e) => {
+    if (!activeResizer) return;
+    if (activeResizer === "left") {
+      const w = Math.max(150, Math.min(460, e.clientX));
+      leftPanel.style.width = `${w}px`;
+      resizeWaveformCanvas();
+    } else if (activeResizer === "right") {
+      const w = Math.max(220, Math.min(580, window.innerWidth - e.clientX));
+      rightPanel.style.width = `${w}px`;
+      resizeWaveformCanvas();
+    } else if (activeResizer === "bottom") {
+      const h = Math.max(54, Math.min(220, window.innerHeight - e.clientY));
+      bottomFooter.style.height = `${h}px`;
+    }
+  });
+
+  window.addEventListener("pointerup", () => {
+    if (!activeResizer) return;
+    leftResizer.classList.remove("active");
+    rightResizer.classList.remove("active");
+    bottomResizer.classList.remove("active");
+    document.body.classList.remove("resizing");
+
+    if (activeResizer === "left") {
+      localStorage.setItem("soundreels_left_width", parseInt(leftPanel.style.width, 10));
+    } else if (activeResizer === "right") {
+      localStorage.setItem("soundreels_right_width", parseInt(rightPanel.style.width, 10));
+    } else if (activeResizer === "bottom") {
+      localStorage.setItem("soundreels_footer_height", parseInt(bottomFooter.style.height, 10));
+    }
+    activeResizer = null;
+    resizeWaveformCanvas();
+  });
+}
+
+initResizers();
 
 document.getElementById("searchInput").addEventListener("input", renderSlotsList);
 

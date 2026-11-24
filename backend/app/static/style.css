@@ -74,3 +74,34 @@
   width: 5px;
   background-color: #ffffff;
 }
+
+/* Panel Splitters / Resizers */
+.resizer-v {
+  width: 5px;
+  cursor: col-resize;
+  background-color: #161616;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease;
+  z-index: 30;
+}
+.resizer-v:hover,
+.resizer-v.active {
+  background-color: #1DB954;
+}
+
+.resizer-h {
+  height: 5px;
+  cursor: row-resize;
+  background-color: #161616;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease;
+  z-index: 30;
+}
+.resizer-h:hover,
+.resizer-h.active {
+  background-color: #1DB954;
+}
+
+body.resizing * {
+  user-select: none !important;
+}
