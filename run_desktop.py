@@ -270,4 +270,13 @@ def main():
     webview.start(**start_kwargs)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        try:
+            with open(ROOT_DIR / "data" / "crash.log", "w", encoding="utf-8") as f:
+                f.write(traceback.format_exc())
+        except Exception:
+            pass
