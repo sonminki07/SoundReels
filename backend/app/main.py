@@ -1824,7 +1824,7 @@ def export_single_slot(req: SingleExportRequest):
     target_dir = (
         Path(req.output_dir).resolve()
         if (req.output_dir or "").strip()
-        else (ROOT_DIR / "exports" / "confirmed_sfx").resolve()
+        else (ROOT_DIR / "exports" / "single_sfx").resolve()
     )
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1871,11 +1871,15 @@ def export_single_slot(req: SingleExportRequest):
         perm = _get_license_permissions(item["sound_id"], item.get("license_type", "CC0"))
         if not perm["commercial_ok"]:
             raise HTTPException(status_code=403, detail=perm["lock_reason"] or "저작권 제한으로 인해 추출할 수 없습니다.")
-        fname = f"{req.slot_id}.wav" if total == 1 else f"{req.slot_id}_{idx:02d}.wav"
+        fname = f"{req.slot_id}__{item['sound_id']}.wav"
         dest_file = (target_dir / fname).resolve()
         if not dest_file.is_relative_to(target_dir):
             raise HTTPException(status_code=403, detail="Path traversal detected")
         src_file = AUDIO_CACHE_DIR / f"{item['sound_id']}.mp3"
+        if not src_file.exists():
+            wav_alt = AUDIO_CACHE_DIR / f"{item['sound_id']}.wav"
+            if wav_alt.exists():
+                src_file = wav_alt
         if not src_file.exists():
             raise HTTPException(status_code=404, detail="Source audio file missing from cache")
         ok = export_processed_audio_to_unity(
@@ -1887,6 +1891,7 @@ def export_single_slot(req: SingleExportRequest):
             preserve_pitch=bool(item["preserve_pitch"]),
             reverse=bool(item.get("reverse", 0)),
             pitch_semitones=float(item.get("pitch_semitones") or 0.0),
+            tail_sec=float(item.get("tail_sec") or 0.0),
         )
         if ok:
             item["custom_rel_wav"] = fname
