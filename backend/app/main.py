@@ -166,11 +166,21 @@ class AudioTrimRequest(BaseModel):
     playback_rate: float = Field(default=1.0, ge=0.25, le=4.0)
     preserve_pitch: int = Field(default=1, ge=0, le=1)
     reverse: int = Field(default=0, ge=0, le=1)
+    pitch_semitones: float = Field(default=0.0, ge=-12.0, le=12.0)
 
 class WorkNoteRequest(BaseModel):
     work_memo: str = ""
     assignee: str = ""
     handoff_status: str = ""
+
+class CreateSlotRequest(BaseModel):
+    name: str
+    category: str = "gimmick"
+    memo: str = ""
+    min_dur: float = Field(default=0.2, ge=0.0)
+    max_dur: float = Field(default=3.0, ge=0.1)
+    search_tags: List[str] = Field(default_factory=list)
+    auto_scout: bool = True
 
 class OpenExternalRequest(BaseModel):
     url: str
@@ -207,6 +217,7 @@ def export_processed_audio_to_unity(
     playback_rate: float = 1.0,
     preserve_pitch: bool = True,
     reverse: bool = False,
+    pitch_semitones: float = 0.0,
 ) -> bool:
     try:
         y, sr = librosa.load(str(src_path), sr=48000, mono=True)
@@ -238,6 +249,12 @@ def export_processed_audio_to_unity(
             else:
                 orig_sr = max(8000, int(round(sr * rate)))
                 processed = librosa.resample(processed, orig_sr=orig_sr, target_sr=sr)
+
+        # 2.5 Apply independent pitch shift in semitones if specified
+        pitch_st = max(-12.0, min(12.0, float(pitch_semitones or 0.0)))
+        if abs(pitch_st) >= 0.1 and len(processed) >= 128:
+            n_fft = min(2048, max(128, 2 ** int(np.floor(np.log2(len(processed))))))
+            processed = librosa.effects.pitch_shift(processed, sr=sr, n_steps=pitch_st, n_fft=n_fft)
 
         # 3. Peak normalization to -1.0 dBFS (prevent digital clipping)
         peak = np.max(np.abs(processed))
@@ -318,7 +335,7 @@ def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
                snd.name, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id,
                COALESCE(snd.norm_gain, 1.0) as norm_gain
         FROM slot_candidates sc
@@ -353,6 +370,80 @@ def get_slot(slot_id: str):
         d = _enrich_slot_dict(dict(row))
     return d
 
+@app.post("/api/slots")
+def create_slot(req: CreateSlotRequest):
+    clean_name = (req.name or "").strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Slot name is required")
+    clean_cat = re.sub(r"[^a-zA-Z0-9_-]", "", (req.category or "gimmick").strip().lower()) or "gimmick"
+    slug = re.sub(r"[^a-z0-9]+", "_", clean_name.lower()).strip("_")
+    base_id = f"sfx_{slug}" if slug else f"sfx_{clean_cat}_{int(time.time())}"
+    base_id = base_id[:48]
+
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id FROM projects ORDER BY id LIMIT 1")
+        proj_row = c.fetchone()
+        project_id = proj_row["id"] if proj_row else "proj_default"
+
+        slot_id = base_id
+        suffix = 2
+        while True:
+            c.execute("SELECT 1 FROM slots WHERE id = ?", (slot_id,))
+            if not c.fetchone():
+                break
+            slot_id = f"{base_id}_{suffix}"
+            suffix += 1
+
+        tags = [t.strip() for t in (req.search_tags or []) if str(t).strip()]
+        if not tags:
+            tags = [clean_name]
+
+        c.execute("""
+        INSERT INTO slots (id, project_id, category, name, memo, min_dur, max_dur, status, search_tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        """, (
+            slot_id,
+            project_id,
+            clean_cat,
+            clean_name,
+            (req.memo or "").strip(),
+            float(req.min_dur or 0.2),
+            float(req.max_dur or 3.0),
+            json.dumps(tags, ensure_ascii=False),
+        ))
+        conn.commit()
+        c.execute("SELECT * FROM slots WHERE id = ?", (slot_id,))
+        created = _enrich_slot_dict(dict(c.fetchone()))
+
+    scout_result = None
+    if req.auto_scout:
+        try:
+            scout_result = get_scout().scout_slot(slot_id, include_freesound=True, max_total_insert=20)
+        except Exception as exc:
+            print(f"[CreateSlot] auto_scout failed for {slot_id}: {exc}")
+
+    return {"status": "ok", "slot": created, "scout": scout_result}
+
+@app.delete("/api/slots/{slot_id}")
+def delete_slot(slot_id: str):
+    validate_id(slot_id, "slot_id")
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("SELECT scene_media_path FROM slots WHERE id = ?", (slot_id,))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Slot not found")
+        if row["scene_media_path"]:
+            media_path = resolve_scene_path(row["scene_media_path"])
+            if media_path and media_path.resolve().is_relative_to(SCENE_CACHE_DIR.resolve()) and media_path.exists():
+                media_path.unlink(missing_ok=True)
+        c.execute("DELETE FROM slot_candidates WHERE slot_id = ?", (slot_id,))
+        c.execute("DELETE FROM confirmed_exports WHERE slot_id = ?", (slot_id,))
+        c.execute("DELETE FROM slots WHERE id = ?", (slot_id,))
+        conn.commit()
+    return {"status": "ok", "deleted_slot_id": slot_id}
+
 @app.get("/api/slots/{slot_id}/candidates")
 def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=None, ge=0.0)):
     validate_id(slot_id, "slot_id")
@@ -363,7 +454,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                    COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-                   COALESCE(sc.reverse, 0) as reverse,
+                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
                    snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
@@ -376,7 +467,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                    COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-                   COALESCE(sc.reverse, 0) as reverse,
+                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
                    snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
@@ -494,7 +585,11 @@ def scout_slot_from_scene(slot_id: str, req: SceneScoutRequest):
     }
 
 @app.get("/api/sounds/{sound_id}/audio")
-def get_sound_audio(sound_id: str, reverse: int = Query(default=0, ge=0, le=1)):
+def get_sound_audio(
+    sound_id: str,
+    reverse: int = Query(default=0, ge=0, le=1),
+    pitch: float = Query(default=0.0, ge=-12.0, le=12.0),
+):
     validate_id(sound_id, "sound_id")
     local_path = (AUDIO_CACHE_DIR / f"{sound_id}.mp3").resolve()
 
@@ -537,23 +632,44 @@ def get_sound_audio(sound_id: str, reverse: int = Query(default=0, ge=0, le=1)):
         if not local_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found in cache")
 
-    if reverse == 1:
-        rev_path = (AUDIO_CACHE_DIR / f"{sound_id}_rev.wav").resolve()
-        if not rev_path.is_relative_to(AUDIO_CACHE_DIR.resolve()):
+    pitch_tenths = int(round(float(pitch or 0.0) * 10))
+    if reverse == 1 or abs(pitch_tenths) >= 1:
+        suffix_parts = []
+        if reverse == 1:
+            suffix_parts.append("rev")
+        if abs(pitch_tenths) >= 1:
+            suffix_parts.append(f"p{pitch_tenths}")
+        proc_path = (AUDIO_CACHE_DIR / f"{sound_id}_{'_'.join(suffix_parts)}.wav").resolve()
+        if not proc_path.is_relative_to(AUDIO_CACHE_DIR.resolve()):
             raise HTTPException(status_code=403, detail="Forbidden path")
-        if not rev_path.exists() or rev_path.stat().st_mtime < local_path.stat().st_mtime:
-            tmp_rev = rev_path.with_suffix(".tmp.wav")
+        if not proc_path.exists() or proc_path.stat().st_mtime < local_path.stat().st_mtime:
+            tmp_proc = proc_path.with_suffix(".tmp.wav")
             try:
                 try:
-                    y, sr = sf.read(str(local_path))
+                    y, sr = sf.read(str(local_path), dtype="float32")
+                    sr = int(sr)
                 except Exception:
                     y, sr = librosa.load(str(local_path), sr=48000, mono=True)
-                sf.write(str(tmp_rev), y[::-1].copy(), int(sr), subtype="PCM_16")
-                tmp_rev.replace(rev_path)
-            except Exception as rev_exc:
-                tmp_rev.unlink(missing_ok=True)
-                raise HTTPException(status_code=500, detail=f"Reverse audio generation failed: {rev_exc}")
-        return FileResponse(str(rev_path), media_type="audio/wav", headers={"Accept-Ranges": "bytes"})
+                    sr = int(sr)
+                if reverse == 1:
+                    y = y[::-1].copy()
+                if abs(pitch_tenths) >= 1 and len(y) > 0:
+                    if y.ndim > 1:
+                        y = np.mean(y, axis=1)
+                    n_fft = min(2048, len(y))
+                    if n_fft >= 32:
+                        y = librosa.effects.pitch_shift(
+                            y.astype(np.float32),
+                            sr=sr,
+                            n_steps=float(pitch_tenths) / 10.0,
+                            n_fft=n_fft,
+                        )
+                sf.write(str(tmp_proc), np.clip(y, -1.0, 1.0), int(sr), subtype="PCM_16")
+                tmp_proc.replace(proc_path)
+            except Exception as proc_exc:
+                tmp_proc.unlink(missing_ok=True)
+                raise HTTPException(status_code=500, detail=f"Processed audio generation failed: {proc_exc}")
+        return FileResponse(str(proc_path), media_type="audio/wav", headers={"Accept-Ranges": "bytes"})
 
     return FileResponse(str(local_path), media_type="audio/mpeg", headers={"Accept-Ranges": "bytes"})
 
@@ -698,9 +814,18 @@ def trim_candidate_audio(req: AudioTrimRequest):
         c = conn.cursor()
         c.execute("""
         UPDATE slot_candidates
-        SET audio_in = ?, audio_out = ?, playback_rate = ?, preserve_pitch = ?, reverse = ?
+        SET audio_in = ?, audio_out = ?, playback_rate = ?, preserve_pitch = ?, reverse = ?, pitch_semitones = ?
         WHERE slot_id = ? AND sound_id = ?
-        """, (req.audio_in, req.audio_out, req.playback_rate, req.preserve_pitch, req.reverse, req.slot_id, req.sound_id))
+        """, (
+            req.audio_in,
+            req.audio_out,
+            req.playback_rate,
+            req.preserve_pitch,
+            req.reverse,
+            req.pitch_semitones,
+            req.slot_id,
+            req.sound_id,
+        ))
         if c.rowcount == 0:
             raise HTTPException(status_code=404, detail="Candidate not found")
         conn.commit()
@@ -711,6 +836,7 @@ def trim_candidate_audio(req: AudioTrimRequest):
         "playback_rate": req.playback_rate,
         "preserve_pitch": req.preserve_pitch,
         "reverse": req.reverse,
+        "pitch_semitones": req.pitch_semitones,
     }
 
 ALLOWED_SETTING_KEYS = {
@@ -936,7 +1062,7 @@ def confirm_candidate(req: ConfirmRequest):
         c.execute("""
         SELECT COALESCE(audio_in, 0.0) as audio_in, COALESCE(audio_out, 0.0) as audio_out,
                COALESCE(playback_rate, 1.0) as playback_rate, COALESCE(preserve_pitch, 1) as preserve_pitch,
-               COALESCE(reverse, 0) as reverse
+               COALESCE(reverse, 0) as reverse, COALESCE(pitch_semitones, 0.0) as pitch_semitones
         FROM slot_candidates WHERE slot_id = ? AND sound_id = ?
         """, (req.slot_id, req.sound_id))
         cand_row = c.fetchone()
@@ -982,6 +1108,7 @@ def confirm_candidate(req: ConfirmRequest):
                     playback_rate=float(cand_row["playback_rate"]),
                     preserve_pitch=bool(cand_row["preserve_pitch"]),
                     reverse=bool(cand_row["reverse"]),
+                    pitch_semitones=float(cand_row["pitch_semitones"]),
                 )
                 exported_path = str(dest_file)
 
@@ -1179,11 +1306,14 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
         rate = float(item.get("playback_rate") or 1.0)
         p_pitch = bool(item.get("preserve_pitch", 1))
         is_rev = bool(item.get("reverse", 0))
+        pitch_st = float(item.get("pitch_semitones") or 0.0)
         has_trim = (a_in > 0.0) or (a_out > 0.0)
         trim_desc = f"{a_in:.2f}s ~ {(a_out if a_out > a_in else raw_dur):.2f}s" if has_trim else f"전체 자동 무음제거 (원본 {raw_dur:.2f}s)"
         clip_len = (max(0.05, (a_out if a_out > a_in else raw_dur) - a_in) if has_trim else raw_dur)
         eff_len = clip_len / max(0.25, rate)
         speed_desc = f"{rate:.2f}x ({'피치유지' if p_pitch else '피치연동'})" if abs(rate - 1.0) >= 0.01 else "1.00x (원속도)"
+        if abs(pitch_st) >= 0.1:
+            speed_desc = f"{speed_desc} · 피치 {pitch_st:+.1f}st"
         if is_rev:
             speed_desc = f"🔁 역재생 · {speed_desc}"
         rel_wav = f"Assets/Audio/SFX/{item['slot_id']}/{item['slot_id']}_01.wav"
@@ -1207,6 +1337,7 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
             "playback_rate": round(rate, 2),
             "preserve_pitch": p_pitch,
             "reverse": is_rev,
+            "pitch_semitones": round(pitch_st, 1),
             "effective_duration": round(eff_len, 2),
         }
         entries.append(entry)
@@ -1239,7 +1370,7 @@ def preview_export_receipt(passed_only: bool = Query(default=False)):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
                s.name as slot_name, s.memo as slot_memo,
                COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
@@ -1270,7 +1401,7 @@ def batch_export_to_unity(req: BatchExportRequest):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
                s.name as slot_name, s.memo as slot_memo,
                COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
@@ -1298,6 +1429,7 @@ def batch_export_to_unity(req: BatchExportRequest):
                         playback_rate=float(item["playback_rate"]),
                         preserve_pitch=bool(item["preserve_pitch"]),
                         reverse=bool(item.get("reverse", 0)),
+                        pitch_semitones=float(item.get("pitch_semitones") or 0.0),
                     )
                     urls = resolve_source_urls(item)
                     credit_url = urls["original_source_url"] or item["source_url"] or "local://ai-generated"
@@ -1347,7 +1479,7 @@ def get_slot_trash(slot_id: str):
         SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
                snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                COALESCE(snd.norm_gain, 1.0) as norm_gain
         FROM slot_candidates sc

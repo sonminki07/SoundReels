@@ -400,3 +400,24 @@
   - `node --check backend/app/static/app.js` 및 Python `py_compile` 오류 0건
   - `verify_v24.py` 및 `test_v12.py` 회귀 테스트 통과
 ================================================================================
+
+22. v2.5 독립 피치/템포 조절, 슬롯 관리(추가/삭제/확정숨김), 회의 반영 DB 정리, 최종 사운드 문서화 및 20건 라이브 저작권 검증
+--------------------------------------------------------------------------------
+- 구현 내역:
+  1) 독립 피치(-12~+12st) & 템포(0.5x~2.5x) 조절 (`db.py`, `main.py`, `index.html`, `app.js`):
+     - `slot_candidates.pitch_semitones` 컬럼 추가 및 `POST /api/actions/trim_audio` 연동
+     - `GET /api/sounds/{sound_id}/audio?reverse=...&pitch=...` 실시간 WAV 캐싱(`librosa.effects.pitch_shift`) 및 `export_processed_audio_to_unity` 내보내기·영수증 반영
+     - 하단 파형 편집기 UI에 `#audioPitchSlider`, `#audioPitchLabel`, `#btnResetPitch` 및 언두/초기화 지원 추가
+  2) 슬롯 관리 편의 기능 (`main.py`, `index.html`, `app.js`):
+     - `POST /api/slots` (신규 슬롯 생성 + 선택적 자동 AI 탐색) & `DELETE /api/slots/{slot_id}` (연결 후보/씬 파일 정리 포함 삭제)
+     - 우측 슬롯 상단 `➕ 슬롯`(`#btnOpenAddSlot` / `#addSlotModal`), `🙈 확정 숨김`(`#btnToggleHideConfirmed`), 인수인계 모달 내 `🗑️ 슬롯 삭제`(`#btnDeleteSlotFromModal`) 추가
+  3) 팀 회의 결과 반영 DB 정리 및 신규 슬롯/URL 구축 (`soundreels.db`):
+     - 미확정·미할당 불필요 7개 슬롯(`sfx_melee_hit_machine`, `sfx_melee_swing_combo_2`, `sfx_melee_swing_combo_3`, `sfx_mob_female_proj_hit`, `sfx_mob_footstep`, `sfx_player_hurt`, `sfx_ui_tab_close`) 제거 (총 29슬롯)
+     - 신규 3종(`sfx_midboss_move` 17후보, `sfx_slime_move` 18후보, `sfx_ui_tab_loading` 20후보) 추가 및 CLAP/Freesound 자동 탐색 완료
+     - 추가 지정 URL 3종(`sfx_player_fall_high`←243400, `sfx_item_tracker`←238958, `sfx_ui_message_alert`←328243) + 메모 지정 `395368`(`sfx_mob_female_projectile`) 임포트·확정 완료
+  4) 최종 사운드 명세서 & 라이브 저작권 검증 (`docs/SOUND_SPEC_AND_LICENSES.md`):
+     - 확정/추가 20개 Freesound URL 실사이트(`https://freesound.org`) HTTP 200 직접 검증 완료 (전원 CC0 1.0 표기, 단 `#125384` Apple iPhone 사운드는 고위험 폐기/대체 권고, `#351256`/`#636578`/`#182365`/`#328243`/`#238958` 유의사항 문서화)
+- 검증 결과 (QA 통과):
+  - `node --check backend/app/static/app.js` & `py_compile` 오류 0건
+  - `verify_v25.py` 통과 (`29`슬롯, `POST/DELETE /api/slots`, `/api/sounds/{id}/audio?pitch=3.0` & `reverse=1&pitch=-2.0`, Unity WAV 피치 내보내기, 영수증 `20`건)
+================================================================================

@@ -5,6 +5,7 @@
 let allSlots = [];
 let currentCategory = "all";
 let slotFilterMode = "all"; // 'all' | 'liked' | 'confirmed'
+let hideConfirmedSlots = localStorage.getItem("soundreels_hide_confirmed") === "true";
 let currentSlot = null;
 let currentCandidates = [];
 let currentIndex = -1;
@@ -57,13 +58,19 @@ let audioOut = 0.0;
 let currentPlaybackRate = 1.0;
 let currentPreservePitch = true;
 let currentReverse = false;
+let currentPitchSemitones = 0.0;
 let audioUndoStack = [];
 let editingMemoSlotId = null;
 
 function getCandidatePlaybackUrl(cand) {
   if (!cand) return "";
   const base = cand.audio_url || `/api/sounds/${cand.sound_id}/audio`;
-  return cand.reverse ? `${base}?reverse=1` : base;
+  const params = new URLSearchParams();
+  if (cand.reverse) params.set("reverse", "1");
+  const pitch = Number(cand.pitch_semitones || 0);
+  if (Math.abs(pitch) >= 0.1) params.set("pitch", pitch.toFixed(1));
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
 }
 let audioDecodeAbort = null;
 let waveformDecodeSeq = 0;
@@ -445,6 +452,7 @@ async function decodeWaveformForCandidate(cand) {
   currentPlaybackRate = Number(cand.playback_rate) || 1.0;
   currentPreservePitch = cand.preserve_pitch !== 0;
   currentReverse = !!cand.reverse;
+  currentPitchSemitones = Number(cand.pitch_semitones) || 0.0;
   audioUndoStack = [];
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
@@ -574,6 +582,12 @@ function applyAudioPlaybackSpeed() {
       ? "px-1.5 py-0.5 rounded bg-cyan-400 text-black border border-cyan-300 text-[11px] font-black transition"
       : "px-1.5 py-0.5 rounded bg-[#242424] text-gray-300 border border-[#383838] text-[11px] font-bold hover:bg-[#333] transition";
   }
+  const p = Math.max(-12, Math.min(12, Number(currentPitchSemitones) || 0.0));
+  currentPitchSemitones = p;
+  const audioPitchSlider = document.getElementById("audioPitchSlider");
+  const audioPitchLabel = document.getElementById("audioPitchLabel");
+  if (audioPitchSlider) audioPitchSlider.value = p;
+  if (audioPitchLabel) audioPitchLabel.textContent = `${p > 0 ? "+" : ""}${Number(p.toFixed(1))}st`;
 }
 
 function updateAudioTrimUI() {
@@ -589,14 +603,17 @@ function updateAudioTrimUI() {
   const speedSuffix = Math.abs(currentPlaybackRate - 1.0) >= 0.01
     ? ` → 실효 ${effLen.toFixed(2)}s (${currentPlaybackRate.toFixed(2)}x)`
     : "";
+  const pitchSuffix = Math.abs(currentPitchSemitones) >= 0.1
+    ? ` · 🎵 ${currentPitchSemitones > 0 ? "+" : ""}${currentPitchSemitones.toFixed(1)}st`
+    : "";
   const revPrefix = currentReverse ? "🔁 역재생 · " : "";
   audioTrimRangeLabel.textContent = isFull
-    ? `${revPrefix}구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)${speedSuffix}`
-    : `${revPrefix}선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)${speedSuffix}`;
+    ? `${revPrefix}구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)${speedSuffix}${pitchSuffix}`
+    : `${revPrefix}선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)${speedSuffix}${pitchSuffix}`;
 }
 
 function pushAudioUndo() {
-  audioUndoStack.push([audioIn, audioOut, currentPlaybackRate, currentPreservePitch, currentReverse]);
+  audioUndoStack.push([audioIn, audioOut, currentPlaybackRate, currentPreservePitch, currentReverse, currentPitchSemitones]);
   if (audioUndoStack.length > 20) audioUndoStack.shift();
 }
 
@@ -608,6 +625,7 @@ async function saveAudioTrimToBackend() {
   cand.playback_rate = Number(currentPlaybackRate.toFixed(2));
   cand.preserve_pitch = currentPreservePitch ? 1 : 0;
   cand.reverse = currentReverse ? 1 : 0;
+  cand.pitch_semitones = Number((Number(currentPitchSemitones) || 0.0).toFixed(1));
   try {
     await fetch("/api/actions/trim_audio", {
       method: "POST",
@@ -620,6 +638,7 @@ async function saveAudioTrimToBackend() {
         playback_rate: cand.playback_rate,
         preserve_pitch: cand.preserve_pitch,
         reverse: cand.reverse,
+        pitch_semitones: cand.pitch_semitones,
       }),
     });
   } catch (e) {
@@ -819,16 +838,19 @@ async function reloadAudioForReverseToggle(cand, autoPlay = true) {
 
 document.getElementById("btnAudioUndo").addEventListener("click", async () => {
   if (audioUndoStack.length === 0) return;
-  const [prevIn, prevOut, prevRate, prevPitch, prevRev] = audioUndoStack.pop();
+  const [prevIn, prevOut, prevRate, prevPitch, prevRev, prevPitchSt] = audioUndoStack.pop();
   const revChanged = prevRev !== undefined && prevRev !== currentReverse;
+  const pitchStChanged = prevPitchSt !== undefined && Math.abs(prevPitchSt - currentPitchSemitones) >= 0.1;
   audioIn = prevIn;
   audioOut = prevOut;
   if (prevRate !== undefined) currentPlaybackRate = prevRate;
   if (prevPitch !== undefined) currentPreservePitch = prevPitch;
   if (prevRev !== undefined) currentReverse = !!prevRev;
+  if (prevPitchSt !== undefined) currentPitchSemitones = Number(prevPitchSt) || 0.0;
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
-  if (revChanged && currentIndex >= 0 && currentCandidates[currentIndex]) {
+  if ((revChanged || pitchStChanged) && currentIndex >= 0 && currentCandidates[currentIndex]) {
+    currentCandidates[currentIndex].pitch_semitones = currentPitchSemitones;
     await reloadAudioForReverseToggle(currentCandidates[currentIndex], false);
   } else {
     await saveAudioTrimToBackend();
@@ -839,14 +861,17 @@ document.getElementById("btnAudioReset").addEventListener("click", async () => {
   if (audioDuration <= 0) return;
   pushAudioUndo();
   const revChanged = currentReverse;
+  const pitchStChanged = Math.abs(currentPitchSemitones) >= 0.1;
   audioIn = 0.0;
   audioOut = audioDuration;
   currentPlaybackRate = 1.0;
   currentPreservePitch = true;
   currentReverse = false;
+  currentPitchSemitones = 0.0;
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
-  if (revChanged && currentIndex >= 0 && currentCandidates[currentIndex]) {
+  if ((revChanged || pitchStChanged) && currentIndex >= 0 && currentCandidates[currentIndex]) {
+    currentCandidates[currentIndex].pitch_semitones = 0.0;
     await reloadAudioForReverseToggle(currentCandidates[currentIndex], false);
   } else {
     await saveAudioTrimToBackend();
@@ -903,6 +928,39 @@ if (btnPreservePitch) {
     currentPreservePitch = !currentPreservePitch;
     applyAudioPlaybackSpeed();
     await saveAudioTrimToBackend();
+  });
+}
+
+const audioPitchSliderEl = document.getElementById("audioPitchSlider");
+if (audioPitchSliderEl) {
+  audioPitchSliderEl.addEventListener("input", () => {
+    currentPitchSemitones = parseFloat(audioPitchSliderEl.value) || 0.0;
+    applyAudioPlaybackSpeed();
+    updateAudioTrimUI();
+  });
+  audioPitchSliderEl.addEventListener("change", async () => {
+    audioPitchSliderEl.blur();
+    if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
+    const cand = currentCandidates[currentIndex];
+    cand.pitch_semitones = Number((parseFloat(audioPitchSliderEl.value) || 0.0).toFixed(1));
+    currentPitchSemitones = cand.pitch_semitones;
+    await reloadAudioForReverseToggle(cand, !audioPlayer.paused);
+  });
+}
+
+const btnResetPitchEl = document.getElementById("btnResetPitch");
+if (btnResetPitchEl) {
+  btnResetPitchEl.addEventListener("click", async () => {
+    if (Math.abs(currentPitchSemitones) < 0.1) return;
+    pushAudioUndo();
+    currentPitchSemitones = 0.0;
+    applyAudioPlaybackSpeed();
+    updateAudioTrimUI();
+    if (currentIndex >= 0 && currentCandidates[currentIndex]) {
+      const cand = currentCandidates[currentIndex];
+      cand.pitch_semitones = 0.0;
+      await reloadAudioForReverseToggle(cand, !audioPlayer.paused);
+    }
   });
 }
 
@@ -1765,6 +1823,115 @@ async function saveSlotMemoFromModal(clearAll = false) {
   }
 }
 
+async function deleteEditingSlotFromModal() {
+  if (!editingMemoSlotId) return;
+  const targetSlot = allSlots.find(s => s.id === editingMemoSlotId);
+  const label = targetSlot ? `${targetSlot.name} (${targetSlot.id})` : editingMemoSlotId;
+  if (!confirm(`정말 '${label}' 슬롯을 삭제할까요?\n연결된 후보/찜/확정 기록이 함께 제거됩니다.`)) return;
+  const deletingId = editingMemoSlotId;
+  try {
+    const res = await fetch(`/api/slots/${deletingId}`, { method: "DELETE" });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(`슬롯 삭제 실패: ${data.detail || "오류"}`);
+      return;
+    }
+    closeSlotMemoModal();
+    if (currentSlot && currentSlot.id === deletingId) {
+      currentSlot = null;
+      currentCandidates = [];
+      currentIndex = -1;
+    }
+    await loadSlots();
+    if (isReviewMode) renderReviewChecklist();
+  } catch (e) {
+    alert(`슬롯 삭제 오류: ${e}`);
+  }
+}
+
+function openAddSlotModal() {
+  const modal = document.getElementById("addSlotModal");
+  if (!modal) return;
+  const nameEl = document.getElementById("addSlotNameInput");
+  const catEl = document.getElementById("addSlotCategorySelect");
+  const durEl = document.getElementById("addSlotMaxDurInput");
+  const memoEl = document.getElementById("addSlotMemoInput");
+  const tagsEl = document.getElementById("addSlotTagsInput");
+  const chkEl = document.getElementById("addSlotAutoScoutChk");
+  if (nameEl) nameEl.value = "";
+  if (catEl && currentCategory !== "all") catEl.value = currentCategory;
+  if (durEl) durEl.value = "3.0";
+  if (memoEl) memoEl.value = "";
+  if (tagsEl) tagsEl.value = "";
+  if (chkEl) chkEl.checked = true;
+  modal.classList.remove("hidden");
+  if (nameEl) setTimeout(() => nameEl.focus(), 20);
+}
+
+function closeAddSlotModal() {
+  const modal = document.getElementById("addSlotModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function submitAddSlotFromModal() {
+  const nameEl = document.getElementById("addSlotNameInput");
+  const catEl = document.getElementById("addSlotCategorySelect");
+  const durEl = document.getElementById("addSlotMaxDurInput");
+  const memoEl = document.getElementById("addSlotMemoInput");
+  const tagsEl = document.getElementById("addSlotTagsInput");
+  const chkEl = document.getElementById("addSlotAutoScoutChk");
+  const btnEl = document.getElementById("btnSubmitAddSlot");
+
+  const name = (nameEl?.value || "").trim();
+  if (!name) {
+    alert("슬롯 이름을 입력해주세요.");
+    if (nameEl) nameEl.focus();
+    return;
+  }
+  const category = (catEl?.value || "gimmick").trim();
+  const maxDur = Math.max(0.5, parseFloat(durEl?.value || "3.0") || 3.0);
+  const memo = (memoEl?.value || "").trim();
+  const searchTags = (tagsEl?.value || "").split(",").map(s => s.trim()).filter(Boolean);
+  const autoScout = !!(chkEl ? chkEl.checked : true);
+
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = autoScout ? "생성 및 탐색 중..." : "추가 중...";
+  }
+  try {
+    const res = await fetch("/api/slots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        category,
+        memo,
+        min_dur: 0.2,
+        max_dur: maxDur,
+        search_tags: searchTags,
+        auto_scout: autoScout,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(`슬롯 추가 실패: ${data.detail || "오류"}`);
+      return;
+    }
+    closeAddSlotModal();
+    await loadSlots();
+    if (data.slot && data.slot.id) {
+      await selectSlot(data.slot.id);
+    }
+  } catch (e) {
+    alert(`슬롯 추가 오류: ${e}`);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = "➕ 추가";
+    }
+  }
+}
+
 async function selectSlot(slotId, autoPlay = true) {
   const slot = allSlots.find(s => s.id === slotId);
   if (!slot) return;
@@ -1963,6 +2130,7 @@ function renderSlotsList() {
   const filtered = allSlots.filter(s => {
     if (slotFilterMode === "confirmed" && s.status !== "confirmed") return false;
     if (slotFilterMode === "liked" && !(s.liked_count > 0)) return false;
+    if (hideConfirmedSlots && slotFilterMode !== "confirmed" && s.status === "confirmed") return false;
     if (currentCategory !== "all" && s.category !== currentCategory) return false;
     const searchVal = topSearchMode === "slot" ? document.getElementById("searchInput").value.toLowerCase() : "";
     if (searchVal && !s.name.toLowerCase().includes(searchVal) && !s.memo.toLowerCase().includes(searchVal)) return false;
@@ -2072,11 +2240,14 @@ function renderCandidatesQueue() {
     const revPill = c.reverse
       ? `<span class="ml-1.5 text-cyan-300 font-bold">🔁역재생</span>`
       : "";
+    const pitchPill = (c.pitch_semitones && Math.abs(c.pitch_semitones) >= 0.1)
+      ? `<span class="ml-1.5 text-violet-300 font-bold">🎵${c.pitch_semitones > 0 ? "+" : ""}${Number(c.pitch_semitones).toFixed(1)}st</span>`
+      : "";
     infoDiv.innerHTML = `
       <span class="shrink-0 bg-[#242424] text-[#1DB954] font-mono font-bold text-xs px-2 py-1 rounded border border-[#333]">#${idx + 1}</span>
       <div class="truncate min-w-0">
         <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}${anchorTag}</div>
-        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}${revPill}</div>
+        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}${revPill}${pitchPill}</div>
       </div>
     `;
 
@@ -2941,6 +3112,7 @@ document.getElementById("btnConfirm").addEventListener("click", confirmCurrent);
 
 const btnFilterLiked = document.getElementById("btnFilterLiked");
 const btnFilterConfirmed = document.getElementById("btnFilterConfirmed");
+const btnToggleHideConfirmed = document.getElementById("btnToggleHideConfirmed");
 
 function updateSlotFilterButtonsUI() {
   if (btnFilterLiked) {
@@ -2957,6 +3129,12 @@ function updateSlotFilterButtonsUI() {
       : "px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838] text-[11px] font-semibold transition";
     btnFilterConfirmed.textContent = active ? "✅ 확정만 중" : "✅ 확정만";
   }
+  if (btnToggleHideConfirmed) {
+    btnToggleHideConfirmed.className = hideConfirmedSlots
+      ? "px-2 py-0.5 rounded-full bg-zinc-200 text-black border border-white text-[11px] font-black transition"
+      : "px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-zinc-300 border border-[#383838] text-[11px] font-semibold transition";
+    btnToggleHideConfirmed.textContent = hideConfirmedSlots ? "🙈 확정 숨김 중" : "🙈 확정 숨김";
+  }
 }
 
 if (btnFilterLiked) {
@@ -2971,6 +3149,23 @@ if (btnFilterLiked) {
 if (btnFilterConfirmed) {
   btnFilterConfirmed.addEventListener("click", () => {
     slotFilterMode = slotFilterMode === "confirmed" ? "all" : "confirmed";
+    if (slotFilterMode === "confirmed" && hideConfirmedSlots) {
+      hideConfirmedSlots = false;
+      localStorage.setItem("soundreels_hide_confirmed", "false");
+    }
+    updateSlotFilterButtonsUI();
+    document.getElementById("tabSlotsBtn").click();
+    renderSlotsList();
+  });
+}
+
+if (btnToggleHideConfirmed) {
+  btnToggleHideConfirmed.addEventListener("click", () => {
+    hideConfirmedSlots = !hideConfirmedSlots;
+    localStorage.setItem("soundreels_hide_confirmed", hideConfirmedSlots ? "true" : "false");
+    if (hideConfirmedSlots && slotFilterMode === "confirmed") {
+      slotFilterMode = "all";
+    }
     updateSlotFilterButtonsUI();
     document.getElementById("tabSlotsBtn").click();
     renderSlotsList();
@@ -3954,11 +4149,12 @@ function playReviewSynced() {
   currentPlaybackRate = Number(cs.playback_rate || 1.0);
   currentPreservePitch = cs.preserve_pitch !== 0;
   currentReverse = !!cs.reverse;
+  currentPitchSemitones = Number(cs.pitch_semitones || 0.0);
   applyAudioPlaybackSpeed();
   audioIn = Number(cs.audio_in || 0.0);
   audioOut = Number(cs.audio_out || 0.0) || Number(cs.duration || 10.0);
 
-  audioPlayer.src = `/api/sounds/${cs.sound_id}/audio${cs.reverse ? "?reverse=1" : ""}`;
+  audioPlayer.src = getCandidatePlaybackUrl(cs);
   const triggerSnd = () => {
     applyAudioPlaybackSpeed();
     audioPlayer.currentTime = audioIn;
@@ -4167,6 +4363,7 @@ window.addEventListener("keydown", (e) => {
   }
 
   if (e.key === "Escape") {
+    closeAddSlotModal();
     closeSlotMemoModal();
     closeSimilarPromptModal();
     closeReceiptModal();
@@ -4175,6 +4372,8 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  const addSlotModalEl = document.getElementById("addSlotModal");
+  if (addSlotModalEl && !addSlotModalEl.classList.contains("hidden")) return;
   const slotMemoModalEl = document.getElementById("slotMemoModal");
   if (slotMemoModalEl && !slotMemoModalEl.classList.contains("hidden")) return;
   const simModal = document.getElementById("similarPromptModal");
@@ -4297,12 +4496,33 @@ if (document.getElementById("btnSaveSlotMemo")) {
 if (document.getElementById("btnClearSlotMemo")) {
   document.getElementById("btnClearSlotMemo").addEventListener("click", () => saveSlotMemoFromModal(true));
 }
+if (document.getElementById("btnDeleteSlotFromModal")) {
+  document.getElementById("btnDeleteSlotFromModal").addEventListener("click", deleteEditingSlotFromModal);
+}
 if (document.getElementById("slotMemoModal")) {
   document.getElementById("slotMemoModal").addEventListener("click", (e) => {
     if (e.target.id === "slotMemoModal") closeSlotMemoModal();
   });
 }
+if (document.getElementById("btnOpenAddSlot")) {
+  document.getElementById("btnOpenAddSlot").addEventListener("click", openAddSlotModal);
+}
+if (document.getElementById("btnCloseAddSlot")) {
+  document.getElementById("btnCloseAddSlot").addEventListener("click", closeAddSlotModal);
+}
+if (document.getElementById("btnCancelAddSlot")) {
+  document.getElementById("btnCancelAddSlot").addEventListener("click", closeAddSlotModal);
+}
+if (document.getElementById("btnSubmitAddSlot")) {
+  document.getElementById("btnSubmitAddSlot").addEventListener("click", submitAddSlotFromModal);
+}
+if (document.getElementById("addSlotModal")) {
+  document.getElementById("addSlotModal").addEventListener("click", (e) => {
+    if (e.target.id === "addSlotModal") closeAddSlotModal();
+  });
+}
 
+updateSlotFilterButtonsUI();
 loadSettingsFromServer().then(() => loadSlots());
 setInterval(loadSlots, 10000);
 setTimeout(() => checkForUpdate(true), 2000);
