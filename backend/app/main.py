@@ -544,8 +544,11 @@ def get_sound_audio(sound_id: str, reverse: int = Query(default=0, ge=0, le=1)):
         if not rev_path.exists() or rev_path.stat().st_mtime < local_path.stat().st_mtime:
             tmp_rev = rev_path.with_suffix(".tmp.wav")
             try:
-                y, sr = librosa.load(str(local_path), sr=48000, mono=True)
-                sf.write(str(tmp_rev), y[::-1].copy(), sr, subtype="PCM_16")
+                try:
+                    y, sr = sf.read(str(local_path))
+                except Exception:
+                    y, sr = librosa.load(str(local_path), sr=48000, mono=True)
+                sf.write(str(tmp_rev), y[::-1].copy(), int(sr), subtype="PCM_16")
                 tmp_rev.replace(rev_path)
             except Exception as rev_exc:
                 tmp_rev.unlink(missing_ok=True)
