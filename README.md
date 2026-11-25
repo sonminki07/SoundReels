@@ -7,6 +7,23 @@
 
 ---
 
+## 🚀 팀원용 AI 원클릭 세팅 & 작업 이어하기
+
+팀원은 본인의 AI(Antigravity, Cursor, Claude 등)에게 아래 프롬프트를 그대로 복사해 전달하면 **현재 DB·음원·확정 폴더·남은 슬롯 상태 그대로** 바로 작업을 이어갈 수 있습니다:
+
+```text
+https://github.com/sonminki07/SoundReels 저장소를 내 PC에 클론(이미 있으면 git pull)한 뒤,
+레포 안의 `TEAM_AI_SETUP.md`와 `docs/SOUNDREELS_HANDOFF.md`를 읽고
+1) 실행 환경(.venv 및 패키지)을 자동으로 설치하고,
+2) SoundReels 데스크톱 앱(`run_desktop.py`)을 실행해서 현재 상태 그대로 띄워줘.
+3) 남은 미추출 슬롯 목록과 사운드 조절/추출 방법을 요약해서 알려줘. 바로 이어서 작업할게.
+```
+
+* 상세 팀원·AI 셋업 가이드: [`TEAM_AI_SETUP.md`](TEAM_AI_SETUP.md)
+* 사운드 조절·남은 12개 슬롯·API 인수인계: [`docs/SOUNDREELS_HANDOFF.md`](docs/SOUNDREELS_HANDOFF.md)
+
+---
+
 ## 📖 개요
 
 게임 개발 시 상황에 딱 맞는 효과음(SFX)을 찾기 위해 수많은 웹사이트를 돌아다니며 일일이 오디오를 재생하고 판단하는 극심한 피로를 덜어내기 위한 도구입니다.
