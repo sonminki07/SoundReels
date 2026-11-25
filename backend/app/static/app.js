@@ -6,6 +6,7 @@ let allSlots = [];
 let currentCategory = "all";
 let slotFilterMode = "all"; // 'all' | 'liked' | 'confirmed'
 let hideConfirmedSlots = localStorage.getItem("soundreels_hide_confirmed") === "true";
+let hideExportedSlots = localStorage.getItem("soundreels_hide_exported") !== "false";
 let currentSlot = null;
 let currentCandidates = [];
 let currentIndex = -1;
@@ -2198,6 +2199,7 @@ function renderSlotsList() {
     if (slotFilterMode === "confirmed" && s.status !== "confirmed") return false;
     if (slotFilterMode === "liked" && !(s.liked_count > 0)) return false;
     if (hideConfirmedSlots && slotFilterMode !== "confirmed" && s.status === "confirmed") return false;
+    if (hideExportedSlots && s.is_exported) return false;
     if (currentCategory !== "all" && s.category !== currentCategory) return false;
     const searchVal = topSearchMode === "slot" ? document.getElementById("searchInput").value.toLowerCase() : "";
     if (searchVal && !s.name.toLowerCase().includes(searchVal) && !s.memo.toLowerCase().includes(searchVal)) return false;
@@ -3346,6 +3348,7 @@ document.getElementById("btnConfirm").addEventListener("click", confirmCurrent);
 const btnFilterLiked = document.getElementById("btnFilterLiked");
 const btnFilterConfirmed = document.getElementById("btnFilterConfirmed");
 const btnToggleHideConfirmed = document.getElementById("btnToggleHideConfirmed");
+const btnToggleHideExported = document.getElementById("btnToggleHideExported");
 
 function updateSlotFilterButtonsUI() {
   if (btnFilterLiked) {
@@ -3367,6 +3370,12 @@ function updateSlotFilterButtonsUI() {
       ? "px-2 py-0.5 rounded-full bg-zinc-200 text-black border border-white text-[11px] font-black transition"
       : "px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-zinc-300 border border-[#383838] text-[11px] font-semibold transition";
     btnToggleHideConfirmed.textContent = hideConfirmedSlots ? "🙈 확정 숨김 중" : "🙈 확정 숨김";
+  }
+  if (btnToggleHideExported) {
+    btnToggleHideExported.className = hideExportedSlots
+      ? "px-2 py-0.5 rounded-full bg-sky-400 text-black border border-sky-300 text-[11px] font-black transition"
+      : "px-2 py-0.5 rounded-full bg-[#242424] hover:bg-[#333] text-sky-300 border border-[#383838] text-[11px] font-semibold transition";
+    btnToggleHideExported.textContent = hideExportedSlots ? "📦 추출됨 숨김 중" : "📦 추출됨 숨김";
   }
 }
 
@@ -3399,6 +3408,16 @@ if (btnToggleHideConfirmed) {
     if (hideConfirmedSlots && slotFilterMode === "confirmed") {
       slotFilterMode = "all";
     }
+    updateSlotFilterButtonsUI();
+    document.getElementById("tabSlotsBtn").click();
+    renderSlotsList();
+  });
+}
+
+if (btnToggleHideExported) {
+  btnToggleHideExported.addEventListener("click", () => {
+    hideExportedSlots = !hideExportedSlots;
+    localStorage.setItem("soundreels_hide_exported", hideExportedSlots ? "true" : "false");
     updateSlotFilterButtonsUI();
     document.getElementById("tabSlotsBtn").click();
     renderSlotsList();
