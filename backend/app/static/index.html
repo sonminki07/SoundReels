@@ -481,9 +481,15 @@
   <footer id="bottomFooter" style="height: 76px; min-height: 58px; max-height: 240px;" class="bg-[#000000] border-t border-[#282828] px-6 py-2.5 flex items-stretch justify-between gap-4 shrink-0 z-20 overflow-hidden">
     <!-- Quick Compare Dock [1~5] (Scoped per active slot!) -->
     <div class="flex items-stretch gap-2.5 flex-1 min-w-0 h-full">
-      <div class="flex flex-col justify-center shrink-0">
-        <span class="text-xs font-bold text-gray-300 uppercase font-mono">비교 독:</span>
-        <span id="dockSlotOwner" class="text-[10px] text-amber-300 truncate max-w-[90px]">현재 슬롯</span>
+      <div class="flex flex-col justify-center shrink-0 gap-1">
+        <div class="flex items-center gap-1.5">
+          <span class="text-xs font-bold text-gray-300 uppercase font-mono">비교 독:</span>
+          <button id="btnOpenLayerMixer" title="두 사운드를 동시에 겹쳐 재생하거나 합쳐서 추출"
+            class="px-2 py-0.5 rounded bg-indigo-950/90 hover:bg-indigo-800 text-indigo-200 border border-indigo-700/80 text-[11px] font-bold transition">
+            🎛️ 동시 재생
+          </button>
+        </div>
+        <span id="dockSlotOwner" class="text-[10px] text-amber-300 truncate max-w-[130px]">현재 슬롯</span>
       </div>
       <div id="compareDock" class="flex-1 flex items-stretch gap-2 h-full min-w-0">
         <button data-dock="0" class="dock-btn flex-1 min-w-[70px] h-full rounded-lg border border-[#333] bg-[#181818] hover:border-gray-400 text-gray-300 flex flex-col items-center justify-center transition px-2 overflow-hidden">
@@ -867,6 +873,68 @@
       <div class="flex items-center justify-end gap-2 pt-2 border-t border-[#2a2a2a]">
         <button id="btnCancelAddSlot" class="px-4 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-gray-300 text-xs font-bold">취소</button>
         <button id="btnSubmitAddSlot" class="px-5 py-2 rounded-lg bg-[#1DB954] hover:bg-[#1ed760] text-black text-xs font-black">➕ 추가</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dual Sound Simultaneous Player & Layer Mixer Modal -->
+  <div id="layerMixerModal" class="hidden fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-[#181818] border border-indigo-700/60 rounded-2xl max-w-xl w-full p-5 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-[#2a2a2a] pb-3">
+        <div>
+          <h3 class="text-base font-black text-white">🎛️ 두 사운드 동시 재생 · 레이어 믹서</h3>
+          <p class="text-[11px] text-gray-400 mt-0.5">선택한 두 사운드를 각각의 피치/템포/트림/여운 설정 그대로 동시에 겹쳐 듣고 합칠 수 있습니다.</p>
+        </div>
+        <button id="btnCloseLayerMixer" class="text-gray-400 hover:text-white text-lg px-2 leading-none">✕</button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div class="bg-[#121212] border border-[#2d2d2d] rounded-xl p-3 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-emerald-300">🔊 사운드 A (메인)</span>
+            <span id="mixGainALabel" class="font-mono text-emerald-300 font-bold">100%</span>
+          </div>
+          <select id="mixSelectA" class="w-full bg-[#1b1b1b] border border-[#383838] rounded-lg px-2.5 py-1.5 text-white outline-none focus:border-[#1DB954]"></select>
+          <div class="flex items-center gap-2">
+            <span class="text-gray-400 w-10">볼륨</span>
+            <input id="mixGainA" type="range" min="0" max="150" step="5" value="100" class="flex-1 accent-[#1DB954] cursor-pointer h-1.5">
+          </div>
+        </div>
+
+        <div class="bg-[#121212] border border-[#2d2d2d] rounded-xl p-3 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-cyan-300">🔊 사운드 B (레이어)</span>
+            <span id="mixGainBLabel" class="font-mono text-cyan-300 font-bold">80%</span>
+          </div>
+          <select id="mixSelectB" class="w-full bg-[#1b1b1b] border border-[#383838] rounded-lg px-2.5 py-1.5 text-white outline-none focus:border-cyan-400"></select>
+          <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2 flex-1">
+              <span class="text-gray-400 w-10">볼륨</span>
+              <input id="mixGainB" type="range" min="0" max="150" step="5" value="80" class="flex-1 accent-cyan-400 cursor-pointer h-1.5">
+            </div>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <span class="text-gray-400">딜레이</span>
+              <input id="mixDelayB" type="number" min="0" max="5" step="0.05" value="0.00"
+                class="w-16 bg-[#1b1b1b] border border-[#383838] rounded px-2 py-1 text-white font-mono outline-none focus:border-cyan-400">
+              <span class="text-gray-400">초</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-2 pt-2 border-t border-[#2a2a2a] flex-wrap">
+        <div class="flex items-center gap-2">
+          <button id="btnMixPlayBoth" class="px-4 py-2 rounded-lg bg-[#1DB954] hover:bg-[#1ed760] text-black text-xs font-black">▶ 둘 다 동시 재생</button>
+          <button id="btnMixStopBoth" class="px-3 py-2 rounded-lg bg-[#242424] hover:bg-[#333] text-gray-200 text-xs font-bold border border-[#383838]">⏹ 정지</button>
+          <label class="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer ml-1">
+            <input id="mixLoopChk" type="checkbox" class="w-3.5 h-3.5 accent-[#1DB954]">
+            <span>반복</span>
+          </label>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btnMixSaveCandidate" class="px-3 py-2 rounded-lg bg-indigo-950 hover:bg-indigo-800 text-indigo-200 border border-indigo-700 text-xs font-bold">💾 합쳐서 후보 저장</button>
+          <button id="btnMixExportWav" class="px-3 py-2 rounded-lg bg-sky-950 hover:bg-sky-800 text-sky-200 border border-sky-700 text-xs font-bold">📤 합쳐서 WAV 추출</button>
+        </div>
       </div>
     </div>
   </div>

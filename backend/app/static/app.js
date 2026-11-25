@@ -4597,6 +4597,7 @@ window.addEventListener("keydown", (e) => {
   }
 
   if (e.key === "Escape") {
+    closeLayerMixerModal();
     closeAddSlotModal();
     closeSlotMemoModal();
     closeSimilarPromptModal();
@@ -4608,6 +4609,8 @@ window.addEventListener("keydown", (e) => {
 
   const addSlotModalEl = document.getElementById("addSlotModal");
   if (addSlotModalEl && !addSlotModalEl.classList.contains("hidden")) return;
+  const layerMixerModalEl = document.getElementById("layerMixerModal");
+  if (layerMixerModalEl && !layerMixerModalEl.classList.contains("hidden")) return;
   const slotMemoModalEl = document.getElementById("slotMemoModal");
   if (slotMemoModalEl && !slotMemoModalEl.classList.contains("hidden")) return;
   const simModal = document.getElementById("similarPromptModal");
@@ -4760,3 +4763,234 @@ updateSlotFilterButtonsUI();
 loadSettingsFromServer().then(() => loadSlots());
 setInterval(loadSlots, 10000);
 setTimeout(() => checkForUpdate(true), 2000);
+
+// =========================================================================
+// Dual-Sound Simultaneous Player & Layer Mixer
+// =========================================================================
+let mixAudioA = new Audio();
+let mixAudioB = new Audio();
+let mixDelayTimer = null;
+let mixTickTimer = null;
+let mixCandidatesCatalog = [];
+
+function stopBothLayers() {
+  if (mixDelayTimer) {
+    clearTimeout(mixDelayTimer);
+    mixDelayTimer = null;
+  }
+  if (mixTickTimer) {
+    clearInterval(mixTickTimer);
+    mixTickTimer = null;
+  }
+  mixAudioA.pause();
+  mixAudioB.pause();
+}
+
+function buildMixSourceOptions() {
+  const opts = [];
+  const seen = new Set();
+  const pushOpt = (slotId, slotName, cand, groupTag) => {
+    if (!cand || !cand.sound_id) return;
+    const key = `${slotId}::${cand.sound_id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    opts.push({
+      key,
+      slotId,
+      slotName,
+      cand,
+      label: `[${groupTag}] ${slotName} — ${cand.name} (${Number(cand.duration || 0).toFixed(2)}s)`,
+    });
+  };
+  if (currentSlot) {
+    currentCandidates.forEach((c, idx) => {
+      pushOpt(currentSlot.id, currentSlot.name, c, idx === currentIndex ? "현재" : (c.candidate_status === "confirmed" ? "확정" : (c.candidate_status === "liked" ? "찜" : `#${idx + 1}`)));
+    });
+  }
+  allSlots.forEach((sl) => {
+    if (sl.confirmed_sound) {
+      pushOpt(sl.id, sl.name, sl.confirmed_sound, "타슬롯확정");
+    }
+  });
+  return opts;
+}
+
+function openLayerMixerModal() {
+  const modal = document.getElementById("layerMixerModal");
+  if (!modal) return;
+  stopBothLayers();
+  audioPlayer.pause();
+
+  mixCandidatesCatalog = buildMixSourceOptions();
+  const selA = document.getElementById("mixSelectA");
+  const selB = document.getElementById("mixSelectB");
+  if (!selA || !selB) return;
+
+  const html = mixCandidatesCatalog.map(o => `<option value="${o.key}">${o.label}</option>`).join("");
+  selA.innerHTML = html;
+  selB.innerHTML = html;
+
+  if (mixCandidatesCatalog.length > 0) {
+    selA.selectedIndex = 0;
+    selB.selectedIndex = mixCandidatesCatalog.length > 1 ? 1 : 0;
+  }
+  modal.classList.remove("hidden");
+}
+
+function closeLayerMixerModal() {
+  stopBothLayers();
+  const modal = document.getElementById("layerMixerModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function playBothLayers() {
+  const selA = document.getElementById("mixSelectA");
+  const selB = document.getElementById("mixSelectB");
+  const gainA = (parseFloat(document.getElementById("mixGainA")?.value || "100") || 100) / 100;
+  const gainB = (parseFloat(document.getElementById("mixGainB")?.value || "80") || 80) / 100;
+  const delayB = Math.max(0, parseFloat(document.getElementById("mixDelayB")?.value || "0") || 0);
+  const itemA = mixCandidatesCatalog.find(o => o.key === selA?.value);
+  const itemB = mixCandidatesCatalog.find(o => o.key === selB?.value);
+  if (!itemA || !itemB) return;
+
+  stopBothLayers();
+
+  const setupAndPlay = (audioEl, cand, gain, delaySec) => {
+    const startAt = Number(cand.audio_in || 0);
+    const rate = Math.max(0.25, Math.min(2.5, Number(cand.playback_rate || 1.0)));
+    audioEl.src = getCandidatePlaybackUrl(cand);
+    audioEl.volume = Math.max(0, Math.min(1, gain));
+    audioEl.playbackRate = rate;
+    audioEl.preservesPitch = cand.preserve_pitch !== 0;
+    const trigger = () => {
+      audioEl.currentTime = startAt;
+      audioEl.playbackRate = rate;
+      audioEl.preservesPitch = cand.preserve_pitch !== 0;
+      audioEl.play().catch(() => {});
+    };
+    audioEl.onloadedmetadata = () => {
+      if (delaySec > 0.01) {
+        mixDelayTimer = setTimeout(trigger, delaySec * 1000);
+      } else {
+        trigger();
+      }
+    };
+    audioEl.load();
+  };
+
+  setupAndPlay(mixAudioA, itemA.cand, gainA, 0);
+  setupAndPlay(mixAudioB, itemB.cand, gainB, delayB);
+
+  const checkEnd = (audioEl, cand) => {
+    if (audioEl.paused) return;
+    const baseOut = Number(cand.audio_out || 0) > Number(cand.audio_in || 0)
+      ? Number(cand.audio_out)
+      : (audioEl.duration || 999);
+    const tail = Number(cand.tail_sec || 0);
+    const effOut = (tail >= 0.05 && Number(cand.audio_out || 0) > Number(cand.audio_in || 0)) ? baseOut + tail : baseOut;
+    if (audioEl.currentTime >= effOut - 0.03) {
+      audioEl.pause();
+      audioEl.currentTime = Number(cand.audio_in || 0);
+    }
+  };
+
+  mixTickTimer = setInterval(() => {
+    checkEnd(mixAudioA, itemA.cand);
+    checkEnd(mixAudioB, itemB.cand);
+    const loopChk = document.getElementById("mixLoopChk");
+    if (loopChk && loopChk.checked && mixAudioA.paused && mixAudioB.paused && !mixDelayTimer) {
+      playBothLayers();
+    }
+  }, 30);
+}
+
+async function submitMixLayers(saveToSlot, exportWav) {
+  if (!currentSlot) {
+    alert("먼저 대상 슬롯을 선택해주세요.");
+    return;
+  }
+  const selA = document.getElementById("mixSelectA");
+  const selB = document.getElementById("mixSelectB");
+  const itemA = mixCandidatesCatalog.find(o => o.key === selA?.value);
+  const itemB = mixCandidatesCatalog.find(o => o.key === selB?.value);
+  if (!itemA || !itemB) return;
+
+  const gainA = (parseFloat(document.getElementById("mixGainA")?.value || "100") || 100) / 100;
+  const gainB = (parseFloat(document.getElementById("mixGainB")?.value || "80") || 80) / 100;
+  const delayB = Math.max(0, parseFloat(document.getElementById("mixDelayB")?.value || "0") || 0);
+
+  try {
+    const res = await fetch("/api/actions/mix_layers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_slot_id: currentSlot.id,
+        slot_id_a: itemA.slotId,
+        sound_id_a: itemA.cand.sound_id,
+        gain_a: gainA,
+        slot_id_b: itemB.slotId,
+        sound_id_b: itemB.cand.sound_id,
+        gain_b: gainB,
+        delay_b_sec: delayB,
+        save_to_slot: saveToSlot,
+        export_wav: exportWav,
+        open_folder: true,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(`믹싱 실패: ${data.detail || "오류"}`);
+      return;
+    }
+    closeLayerMixerModal();
+    await loadSlots();
+    if (saveToSlot) {
+      await selectSlot(currentSlot.id, true);
+    }
+    if (exportWav && data.exported_path) {
+      alert(`합친 WAV 추출 완료:\n${data.exported_path}`);
+    }
+  } catch (e) {
+    alert(`믹싱 오류: ${e}`);
+  }
+}
+
+if (document.getElementById("btnOpenLayerMixer")) {
+  document.getElementById("btnOpenLayerMixer").addEventListener("click", openLayerMixerModal);
+}
+if (document.getElementById("btnCloseLayerMixer")) {
+  document.getElementById("btnCloseLayerMixer").addEventListener("click", closeLayerMixerModal);
+}
+if (document.getElementById("layerMixerModal")) {
+  document.getElementById("layerMixerModal").addEventListener("click", (e) => {
+    if (e.target.id === "layerMixerModal") closeLayerMixerModal();
+  });
+}
+if (document.getElementById("mixGainA")) {
+  document.getElementById("mixGainA").addEventListener("input", (e) => {
+    const val = parseFloat(e.target.value) || 0;
+    const lbl = document.getElementById("mixGainALabel");
+    if (lbl) lbl.textContent = `${val}%`;
+    mixAudioA.volume = Math.max(0, Math.min(1, val / 100));
+  });
+}
+if (document.getElementById("mixGainB")) {
+  document.getElementById("mixGainB").addEventListener("input", (e) => {
+    const val = parseFloat(e.target.value) || 0;
+    const lbl = document.getElementById("mixGainBLabel");
+    if (lbl) lbl.textContent = `${val}%`;
+    mixAudioB.volume = Math.max(0, Math.min(1, val / 100));
+  });
+}
+if (document.getElementById("btnMixPlayBoth")) {
+  document.getElementById("btnMixPlayBoth").addEventListener("click", playBothLayers);
+}
+if (document.getElementById("btnMixStopBoth")) {
+  document.getElementById("btnMixStopBoth").addEventListener("click", stopBothLayers);
+}
+if (document.getElementById("btnMixSaveCandidate")) {
+  document.getElementById("btnMixSaveCandidate").addEventListener("click", () => submitMixLayers(true, false));
+}
+if (document.getElementById("btnMixExportWav")) {
+  document.getElementById("btnMixExportWav").addEventListener("click", () => submitMixLayers(false, true));
+}

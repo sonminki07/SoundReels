@@ -290,6 +290,49 @@ def _apply_tail_reverb(y: np.ndarray, sr: int, tail_sec: float) -> np.ndarray:
     return np.stack(cols, axis=1)
 
 
+def _render_processed_audio_array(
+    src_path: Path,
+    audio_in: float = 0.0,
+    audio_out: float = 0.0,
+    playback_rate: float = 1.0,
+    preserve_pitch: bool = True,
+    reverse: bool = False,
+    pitch_semitones: float = 0.0,
+    tail_sec: float = 0.0,
+    sr: int = 48000,
+) -> Optional[np.ndarray]:
+    y, sr = librosa.load(str(src_path), sr=sr, mono=True)
+    if len(y) == 0:
+        return None
+    if reverse:
+        y = y[::-1].copy()
+    has_custom_trim = (audio_in > 0.0) or (audio_out > 0.0)
+    if has_custom_trim:
+        start_sample = int(max(0.0, audio_in) * sr)
+        end_sample = int(audio_out * sr) if audio_out > audio_in else len(y)
+        end_sample = min(max(start_sample + 1, end_sample), len(y))
+        processed = y[start_sample:end_sample]
+    else:
+        processed, _ = librosa.effects.trim(y, top_db=30)
+        if len(processed) == 0:
+            processed = y
+    rate = max(0.25, min(4.0, float(playback_rate or 1.0)))
+    if abs(rate - 1.0) > 1e-3 and len(processed) >= 128:
+        if preserve_pitch:
+            n_fft = min(2048, max(128, 2 ** int(np.floor(np.log2(len(processed))))))
+            processed = librosa.effects.time_stretch(processed, rate=rate, n_fft=n_fft)
+        else:
+            orig_sr = max(8000, int(round(sr * rate)))
+            processed = librosa.resample(processed, orig_sr=orig_sr, target_sr=sr)
+    pitch_st = max(-12.0, min(12.0, float(pitch_semitones or 0.0)))
+    if abs(pitch_st) >= 0.1 and len(processed) >= 128:
+        n_fft = min(2048, max(128, 2 ** int(np.floor(np.log2(len(processed))))))
+        processed = librosa.effects.pitch_shift(processed, sr=sr, n_steps=pitch_st, n_fft=n_fft)
+    if float(tail_sec or 0.0) >= 0.05:
+        processed = _apply_tail_reverb(processed, sr, float(tail_sec))
+    return processed
+
+
 # --- Helper: Audio Processing on Export (Trim + Silence Trim + -1dBFS Peak Normalization) ---
 def export_processed_audio_to_unity(
     src_path: Path,
@@ -303,45 +346,20 @@ def export_processed_audio_to_unity(
     tail_sec: float = 0.0,
 ) -> bool:
     try:
-        y, sr = librosa.load(str(src_path), sr=48000, mono=True)
-        if len(y) == 0:
+        sr = 48000
+        processed = _render_processed_audio_array(
+            src_path,
+            audio_in=audio_in,
+            audio_out=audio_out,
+            playback_rate=playback_rate,
+            preserve_pitch=preserve_pitch,
+            reverse=reverse,
+            pitch_semitones=pitch_semitones,
+            tail_sec=tail_sec,
+            sr=sr,
+        )
+        if processed is None or len(processed) == 0:
             return False
-
-        if reverse:
-            y = y[::-1].copy()
-
-        # 1. Apply user-defined non-destructive trim range if specified
-        has_custom_trim = (audio_in > 0.0) or (audio_out > 0.0)
-        if has_custom_trim:
-            start_sample = int(max(0.0, audio_in) * sr)
-            end_sample = int(audio_out * sr) if audio_out > audio_in else len(y)
-            end_sample = min(max(start_sample + 1, end_sample), len(y))
-            processed = y[start_sample:end_sample]
-        else:
-            # Default: trim leading and trailing silence automatically
-            processed, _ = librosa.effects.trim(y, top_db=30)
-            if len(processed) == 0:
-                processed = y
-
-        # 2. Apply playback speed modification (pitch-preserving time-stretch OR pitch-linked resample)
-        rate = max(0.25, min(4.0, float(playback_rate or 1.0)))
-        if abs(rate - 1.0) > 1e-3 and len(processed) >= 128:
-            if preserve_pitch:
-                n_fft = min(2048, max(128, 2 ** int(np.floor(np.log2(len(processed))))))
-                processed = librosa.effects.time_stretch(processed, rate=rate, n_fft=n_fft)
-            else:
-                orig_sr = max(8000, int(round(sr * rate)))
-                processed = librosa.resample(processed, orig_sr=orig_sr, target_sr=sr)
-
-        # 2.5 Apply independent pitch shift in semitones if specified
-        pitch_st = max(-12.0, min(12.0, float(pitch_semitones or 0.0)))
-        if abs(pitch_st) >= 0.1 and len(processed) >= 128:
-            n_fft = min(2048, max(128, 2 ** int(np.floor(np.log2(len(processed))))))
-            processed = librosa.effects.pitch_shift(processed, sr=sr, n_steps=pitch_st, n_fft=n_fft)
-
-        # 2.8 Append natural decaying sustain/reverb tail if requested
-        if float(tail_sec or 0.0) >= 0.05:
-            processed = _apply_tail_reverb(processed, sr, float(tail_sec))
 
         # 3. Peak normalization to -1.0 dBFS (prevent digital clipping)
         peak = np.max(np.abs(processed))
@@ -1897,6 +1915,149 @@ def export_single_slot(req: SingleExportRequest):
         "files": [it["custom_rel_wav"] for it in exported_rows],
         "receipt_text": receipt_bundle["receipt_text"],
     }
+
+
+class MixLayersRequest(BaseModel):
+    target_slot_id: str
+    slot_id_a: str
+    sound_id_a: str
+    gain_a: float = Field(default=1.0, ge=0.0, le=2.0)
+    slot_id_b: str
+    sound_id_b: str
+    gain_b: float = Field(default=0.8, ge=0.0, le=2.0)
+    delay_b_sec: float = Field(default=0.0, ge=0.0, le=5.0)
+    save_to_slot: bool = True
+    export_wav: bool = False
+    open_folder: bool = True
+
+
+@app.post("/api/actions/mix_layers")
+def mix_two_sounds(req: MixLayersRequest):
+    """Layers/mixes two sounds (with their trim/tempo/pitch/reverse/tail edits) into a combined WAV or slot candidate."""
+    validate_id(req.target_slot_id, "target_slot_id")
+    validate_id(req.slot_id_a, "slot_id_a")
+    validate_id(req.sound_id_a, "sound_id_a")
+    validate_id(req.slot_id_b, "slot_id_b")
+    validate_id(req.sound_id_b, "sound_id_b")
+
+    def _load_meta(c, slot_id: str, sound_id: str) -> Dict[str, Any]:
+        c.execute("""
+        SELECT snd.id as sound_id, snd.name, snd.file_path, snd.license_type, snd.author, snd.source_url, snd.source_id, snd.tags,
+               COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+               COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+               COALESCE(sc.tail_sec, 0.0) as tail_sec
+        FROM sounds snd
+        LEFT JOIN slot_candidates sc ON sc.sound_id = snd.id AND sc.slot_id = ?
+        WHERE snd.id = ?
+        """, (slot_id, sound_id))
+        row = c.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Sound not found: {sound_id}")
+        return dict(row)
+
+    with get_db_context() as conn:
+        c = conn.cursor()
+        meta_a = _load_meta(c, req.slot_id_a, req.sound_id_a)
+        meta_b = _load_meta(c, req.slot_id_b, req.sound_id_b)
+
+    for m in (meta_a, meta_b):
+        perm = _get_license_permissions(m["sound_id"], m.get("license_type", "CC0"))
+        if not perm["commercial_ok"] or not perm["modify_ok"]:
+            raise HTTPException(status_code=403, detail=perm["lock_reason"] or f"저작권 제한으로 인해 믹싱할 수 없습니다: {m['name']}")
+
+    path_a = resolve_audio_path(meta_a["sound_id"], meta_a.get("file_path"))
+    path_b = resolve_audio_path(meta_b["sound_id"], meta_b.get("file_path"))
+    if not path_a.exists() or not path_b.exists():
+        raise HTTPException(status_code=404, detail="원본 오디오 파일을 찾을 수 없습니다.")
+
+    sr = 48000
+    ya = _render_processed_audio_array(
+        path_a,
+        audio_in=float(meta_a["audio_in"]),
+        audio_out=float(meta_a["audio_out"]),
+        playback_rate=float(meta_a["playback_rate"]),
+        preserve_pitch=bool(meta_a["preserve_pitch"]),
+        reverse=bool(meta_a["reverse"]),
+        pitch_semitones=float(meta_a["pitch_semitones"]),
+        tail_sec=float(meta_a["tail_sec"]),
+        sr=sr,
+    )
+    yb = _render_processed_audio_array(
+        path_b,
+        audio_in=float(meta_b["audio_in"]),
+        audio_out=float(meta_b["audio_out"]),
+        playback_rate=float(meta_b["playback_rate"]),
+        preserve_pitch=bool(meta_b["preserve_pitch"]),
+        reverse=bool(meta_b["reverse"]),
+        pitch_semitones=float(meta_b["pitch_semitones"]),
+        tail_sec=float(meta_b["tail_sec"]),
+        sr=sr,
+    )
+    if ya is None or yb is None:
+        raise HTTPException(status_code=500, detail="오디오 믹싱 처리 실패")
+
+    delay_samples = int(round(max(0.0, req.delay_b_sec) * sr))
+    total_len = max(len(ya), delay_samples + len(yb))
+    mixed = np.zeros(total_len, dtype=np.float32)
+    mixed[: len(ya)] += ya.astype(np.float32) * float(req.gain_a)
+    mixed[delay_samples : delay_samples + len(yb)] += yb.astype(np.float32) * float(req.gain_b)
+
+    peak = float(np.max(np.abs(mixed))) if len(mixed) > 0 else 0.0
+    if peak > 0:
+        mixed = mixed * ((10.0 ** (-1.0 / 20.0)) / peak)
+
+    mix_dur = round(float(len(mixed)) / sr, 3)
+    mix_id = f"mix_{int(time.time() * 1000)}"
+    result: Dict[str, Any] = {"status": "ok", "duration": mix_dur}
+
+    if req.save_to_slot:
+        cache_wav = (AUDIO_CACHE_DIR / f"{mix_id}.wav").resolve()
+        sf.write(str(cache_wav), mixed, sr, subtype="PCM_24")
+        norm_g = compute_norm_gain(cache_wav)
+        lic = "CC-BY" if ("BY" in str(meta_a["license_type"]).upper() or "BY" in str(meta_b["license_type"]).upper()) else "CC0"
+        with get_db_context() as conn:
+            c = conn.cursor()
+            c.execute("""
+            INSERT INTO sounds (id, source, source_id, name, file_path, duration, license_type, author, source_url, tags, norm_gain)
+            VALUES (?, 'procedural', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                mix_id,
+                mix_id,
+                f"{meta_a['name']} + {meta_b['name']}",
+                str(cache_wav),
+                mix_dur,
+                lic,
+                f"{meta_a['author']} & {meta_b['author']}",
+                meta_a.get("source_url") or "",
+                json.dumps(["mixed", "layered"], ensure_ascii=False),
+                norm_g,
+            ))
+            c.execute("UPDATE slot_candidates SET rank = rank + 1 WHERE slot_id = ?", (req.target_slot_id,))
+            c.execute("""
+            INSERT INTO slot_candidates (slot_id, sound_id, score, rank, status)
+            VALUES (?, ?, 1.0, 1, 'liked')
+            """, (req.target_slot_id, mix_id))
+            conn.commit()
+        result["saved_sound_id"] = mix_id
+
+    if req.export_wav:
+        out_dir = (ROOT_DIR / "exports" / "confirmed_sfx").resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = (out_dir / f"{req.target_slot_id}_mix.wav").resolve()
+        sf.write(str(out_file), mixed, sr, subtype="PCM_24")
+        with get_db_context() as conn:
+            c = conn.cursor()
+            c.execute("UPDATE slots SET is_exported = 1, exported_at = datetime('now', 'localtime') WHERE id = ?", (req.target_slot_id,))
+            conn.commit()
+        if req.open_folder and os.name == "nt":
+            try:
+                os.startfile(str(out_dir))
+            except Exception:
+                pass
+        result["exported_path"] = str(out_file)
+
+    return result
 
 # --- Trash / Restore, Manual Search, URL Import & Desktop Popup Bridge (v2.2) ---
 _desktop_popup_state: Dict[str, Any] = {
