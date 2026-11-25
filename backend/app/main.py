@@ -167,6 +167,7 @@ class AudioTrimRequest(BaseModel):
     preserve_pitch: int = Field(default=1, ge=0, le=1)
     reverse: int = Field(default=0, ge=0, le=1)
     pitch_semitones: float = Field(default=0.0, ge=-12.0, le=12.0)
+    tail_sec: float = Field(default=0.0, ge=0.0, le=5.0)
 
 class WorkNoteRequest(BaseModel):
     work_memo: str = ""
@@ -208,6 +209,60 @@ def on_startup():
     import threading
     threading.Thread(target=get_scout, daemon=True).start()
 
+def _apply_tail_reverb(y: np.ndarray, sr: int, tail_sec: float) -> np.ndarray:
+    """Appends a natural decaying sustain/reverb tail from the end of the clip without altering the attack."""
+    t_sec = max(0.0, min(5.0, float(tail_sec or 0.0)))
+    if t_sec < 0.05 or len(y) < 32:
+        return y
+    tail_samples = int(round(t_sec * sr))
+    if tail_samples <= 0:
+        return y
+
+    def _process_1d(sig: np.ndarray) -> np.ndarray:
+        sig = sig.astype(np.float32)
+        src_len = min(len(sig), int(0.35 * sr))
+        seed = sig[-src_len:].copy()
+        fade_in = min(len(seed), int(0.015 * sr))
+        if fade_in > 1:
+            seed[:fade_in] *= np.linspace(0.0, 1.0, fade_in, dtype=np.float32)
+        # Multi-tap decaying comb reflection buffer for smooth bell/SFX sustain tail
+        total_buf = np.zeros(src_len + tail_samples, dtype=np.float32)
+        total_buf[:src_len] = seed
+        delays = [int(0.029 * sr), int(0.037 * sr), int(0.043 * sr), int(0.053 * sr)]
+        gains = [0.68, 0.62, 0.56, 0.50]
+        wet = np.zeros_like(total_buf)
+        for d, g in zip(delays, gains):
+            if d < 1 or d >= len(total_buf):
+                continue
+            buf = total_buf.copy()
+            # Vectorized block-wise feedback decay using exponential overlap
+            step = d
+            pos = step
+            decay_factor = g * (0.001 ** (step / max(1.0, tail_samples)))
+            while pos < len(buf):
+                end = min(len(buf), pos + step)
+                seg_len = end - pos
+                buf[pos:end] += buf[pos - step : pos - step + seg_len] * decay_factor
+                pos += step
+            wet += buf * 0.28
+        tail_part = wet[src_len : src_len + tail_samples].copy()
+        # Smooth exponential decay to silence at the end
+        env = np.linspace(1.0, 0.0, len(tail_part), dtype=np.float32) ** 1.4
+        tail_part *= env
+        # Crossfade seam (12ms) between original end and tail start
+        xfade = min(len(sig), len(tail_part), int(0.012 * sr))
+        out_sig = np.concatenate([sig, tail_part])
+        if xfade > 1:
+            ramp_down = np.linspace(1.0, 0.35, xfade, dtype=np.float32)
+            out_sig[len(sig) - xfade : len(sig)] *= ramp_down
+        return out_sig
+
+    if y.ndim == 1:
+        return _process_1d(y)
+    cols = [_process_1d(y[:, ch]) for ch in range(y.shape[1])]
+    return np.stack(cols, axis=1)
+
+
 # --- Helper: Audio Processing on Export (Trim + Silence Trim + -1dBFS Peak Normalization) ---
 def export_processed_audio_to_unity(
     src_path: Path,
@@ -218,6 +273,7 @@ def export_processed_audio_to_unity(
     preserve_pitch: bool = True,
     reverse: bool = False,
     pitch_semitones: float = 0.0,
+    tail_sec: float = 0.0,
 ) -> bool:
     try:
         y, sr = librosa.load(str(src_path), sr=48000, mono=True)
@@ -255,6 +311,10 @@ def export_processed_audio_to_unity(
         if abs(pitch_st) >= 0.1 and len(processed) >= 128:
             n_fft = min(2048, max(128, 2 ** int(np.floor(np.log2(len(processed))))))
             processed = librosa.effects.pitch_shift(processed, sr=sr, n_steps=pitch_st, n_fft=n_fft)
+
+        # 2.8 Append natural decaying sustain/reverb tail if requested
+        if float(tail_sec or 0.0) >= 0.05:
+            processed = _apply_tail_reverb(processed, sr, float(tail_sec))
 
         # 3. Peak normalization to -1.0 dBFS (prevent digital clipping)
         peak = np.max(np.abs(processed))
@@ -335,7 +395,7 @@ def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                snd.name, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id,
                COALESCE(snd.norm_gain, 1.0) as norm_gain
         FROM slot_candidates sc
@@ -454,7 +514,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                    COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                    snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
@@ -467,7 +527,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                    COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                    snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
@@ -589,6 +649,8 @@ def get_sound_audio(
     sound_id: str,
     reverse: int = Query(default=0, ge=0, le=1),
     pitch: float = Query(default=0.0, ge=-12.0, le=12.0),
+    out: float = Query(default=0.0, ge=0.0),
+    tail: float = Query(default=0.0, ge=0.0, le=5.0),
 ):
     validate_id(sound_id, "sound_id")
     local_path = (AUDIO_CACHE_DIR / f"{sound_id}.mp3").resolve()
@@ -633,12 +695,16 @@ def get_sound_audio(
             raise HTTPException(status_code=404, detail="Audio file not found in cache")
 
     pitch_tenths = int(round(float(pitch or 0.0) * 10))
-    if reverse == 1 or abs(pitch_tenths) >= 1:
+    tail_tenths = int(round(float(tail or 0.0) * 10))
+    out_ms = int(round(float(out or 0.0) * 1000))
+    if reverse == 1 or abs(pitch_tenths) >= 1 or tail_tenths >= 1:
         suffix_parts = []
         if reverse == 1:
             suffix_parts.append("rev")
         if abs(pitch_tenths) >= 1:
             suffix_parts.append(f"p{pitch_tenths}")
+        if tail_tenths >= 1:
+            suffix_parts.append(f"o{out_ms}_t{tail_tenths}")
         proc_path = (AUDIO_CACHE_DIR / f"{sound_id}_{'_'.join(suffix_parts)}.wav").resolve()
         if not proc_path.is_relative_to(AUDIO_CACHE_DIR.resolve()):
             raise HTTPException(status_code=403, detail="Forbidden path")
@@ -664,6 +730,12 @@ def get_sound_audio(
                             n_steps=float(pitch_tenths) / 10.0,
                             n_fft=n_fft,
                         )
+                if tail_tenths >= 1 and len(y) > 0:
+                    if out_ms > 0:
+                        end_idx = min(len(y), int(round((out_ms / 1000.0) * sr)))
+                        if end_idx >= 32:
+                            y = y[:end_idx]
+                    y = _apply_tail_reverb(y, sr, float(tail_tenths) / 10.0)
                 sf.write(str(tmp_proc), np.clip(y, -1.0, 1.0), int(sr), subtype="PCM_16")
                 tmp_proc.replace(proc_path)
             except Exception as proc_exc:
@@ -814,7 +886,7 @@ def trim_candidate_audio(req: AudioTrimRequest):
         c = conn.cursor()
         c.execute("""
         UPDATE slot_candidates
-        SET audio_in = ?, audio_out = ?, playback_rate = ?, preserve_pitch = ?, reverse = ?, pitch_semitones = ?
+        SET audio_in = ?, audio_out = ?, playback_rate = ?, preserve_pitch = ?, reverse = ?, pitch_semitones = ?, tail_sec = ?
         WHERE slot_id = ? AND sound_id = ?
         """, (
             req.audio_in,
@@ -823,6 +895,7 @@ def trim_candidate_audio(req: AudioTrimRequest):
             req.preserve_pitch,
             req.reverse,
             req.pitch_semitones,
+            req.tail_sec,
             req.slot_id,
             req.sound_id,
         ))
@@ -838,6 +911,7 @@ def trim_candidate_audio(req: AudioTrimRequest):
         "preserve_pitch": req.preserve_pitch,
         "reverse": req.reverse,
         "pitch_semitones": req.pitch_semitones,
+        "tail_sec": req.tail_sec,
     }
 
 ALLOWED_SETTING_KEYS = {
@@ -1063,7 +1137,8 @@ def confirm_candidate(req: ConfirmRequest):
         c.execute("""
         SELECT COALESCE(audio_in, 0.0) as audio_in, COALESCE(audio_out, 0.0) as audio_out,
                COALESCE(playback_rate, 1.0) as playback_rate, COALESCE(preserve_pitch, 1) as preserve_pitch,
-               COALESCE(reverse, 0) as reverse, COALESCE(pitch_semitones, 0.0) as pitch_semitones
+               COALESCE(reverse, 0) as reverse, COALESCE(pitch_semitones, 0.0) as pitch_semitones,
+               COALESCE(tail_sec, 0.0) as tail_sec
         FROM slot_candidates WHERE slot_id = ? AND sound_id = ?
         """, (req.slot_id, req.sound_id))
         cand_row = c.fetchone()
@@ -1110,6 +1185,7 @@ def confirm_candidate(req: ConfirmRequest):
                     preserve_pitch=bool(cand_row["preserve_pitch"]),
                     reverse=bool(cand_row["reverse"]),
                     pitch_semitones=float(cand_row["pitch_semitones"]),
+                    tail_sec=float(cand_row["tail_sec"]),
                 )
                 exported_path = str(dest_file)
 
@@ -1333,13 +1409,16 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
         p_pitch = bool(item.get("preserve_pitch", 1))
         is_rev = bool(item.get("reverse", 0))
         pitch_st = float(item.get("pitch_semitones") or 0.0)
+        tail_s = float(item.get("tail_sec") or 0.0)
         has_trim = (a_in > 0.0) or (a_out > 0.0)
         trim_desc = f"{a_in:.2f}s ~ {(a_out if a_out > a_in else raw_dur):.2f}s" if has_trim else f"전체 자동 무음제거 (원본 {raw_dur:.2f}s)"
-        clip_len = (max(0.05, (a_out if a_out > a_in else raw_dur) - a_in) if has_trim else raw_dur)
+        clip_len = (max(0.05, (a_out if a_out > a_in else raw_dur) - a_in) if has_trim else raw_dur) + tail_s
         eff_len = clip_len / max(0.25, rate)
         speed_desc = f"{rate:.2f}x ({'피치유지' if p_pitch else '피치연동'})" if abs(rate - 1.0) >= 0.01 else "1.00x (원속도)"
         if abs(pitch_st) >= 0.1:
             speed_desc = f"{speed_desc} · 피치 {pitch_st:+.1f}st"
+        if tail_s >= 0.05:
+            speed_desc = f"{speed_desc} · 여운 +{tail_s:.1f}s"
         if is_rev:
             speed_desc = f"🔁 역재생 · {speed_desc}"
         rel_wav = item.get("custom_rel_wav") or f"Assets/Audio/SFX/{item['slot_id']}/{item['slot_id']}_01.wav"
@@ -1366,6 +1445,7 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
             "preserve_pitch": p_pitch,
             "reverse": is_rev,
             "pitch_semitones": round(pitch_st, 1),
+            "tail_sec": round(tail_s, 1),
             "effective_duration": round(eff_len, 2),
         }
         entries.append(entry)
@@ -1400,7 +1480,7 @@ def preview_export_receipt(passed_only: bool = Query(default=False)):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                s.name as slot_name, s.memo as slot_memo,
                COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
@@ -1431,7 +1511,7 @@ def batch_export_to_unity(req: BatchExportRequest):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                s.name as slot_name, s.memo as slot_memo,
                COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
@@ -1460,6 +1540,7 @@ def batch_export_to_unity(req: BatchExportRequest):
                         preserve_pitch=bool(item["preserve_pitch"]),
                         reverse=bool(item.get("reverse", 0)),
                         pitch_semitones=float(item.get("pitch_semitones") or 0.0),
+                        tail_sec=float(item.get("tail_sec") or 0.0),
                     )
                     urls = resolve_source_urls(item)
                     credit_url = urls["original_source_url"] or item["source_url"] or "local://ai-generated"
@@ -1522,7 +1603,7 @@ def export_confirmed_bundle(req: ConfirmedBundleRequest):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                s.name as slot_name, s.memo as slot_memo,
                COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
@@ -1659,7 +1740,7 @@ def export_single_slot(req: SingleExportRequest):
             SELECT sc.slot_id, sc.sound_id,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                    COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                    s.name as slot_name, s.memo as slot_memo,
                    COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                    snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
@@ -1674,7 +1755,7 @@ def export_single_slot(req: SingleExportRequest):
             SELECT sc.slot_id, sc.sound_id,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                    COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                    s.name as slot_name, s.memo as slot_memo,
                    COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                    snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
@@ -1753,7 +1834,7 @@ def get_slot_trash(slot_id: str):
         SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
-               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones, COALESCE(sc.tail_sec, 0.0) as tail_sec,
                snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                COALESCE(snd.norm_gain, 1.0) as norm_gain
         FROM slot_candidates sc

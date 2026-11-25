@@ -331,12 +331,13 @@
               <!-- Playback Tempo (Speed) & Independent Pitch & Reverse Controls -->
               <div class="flex items-center gap-1 bg-[#1b1b1b] border border-[#303030] rounded px-1.5 py-0.5 flex-wrap" title="템포(배속)·피치(음높이)·역재생 비파괴 편집">
                 <span class="text-[11px] text-amber-400 font-bold">⚡템포</span>
+                <button data-rate="0.5" class="speed-preset-btn px-1.5 py-0.5 rounded text-[11px] text-gray-300 hover:bg-[#2c2c2c]">0.5x</button>
                 <button data-rate="0.75" class="speed-preset-btn px-1.5 py-0.5 rounded text-[11px] text-gray-300 hover:bg-[#2c2c2c]">0.75x</button>
                 <button data-rate="1.0" class="speed-preset-btn px-1.5 py-0.5 rounded text-[11px] bg-[#1DB954] text-black font-bold">1.0x</button>
                 <button data-rate="1.25" class="speed-preset-btn px-1.5 py-0.5 rounded text-[11px] text-gray-300 hover:bg-[#2c2c2c]">1.25x</button>
                 <button data-rate="1.5" class="speed-preset-btn px-1.5 py-0.5 rounded text-[11px] text-gray-300 hover:bg-[#2c2c2c]">1.5x</button>
                 <button data-rate="2.0" class="speed-preset-btn px-1.5 py-0.5 rounded text-[11px] text-gray-300 hover:bg-[#2c2c2c]">2.0x</button>
-                <input id="audioRateSlider" type="range" min="0.5" max="2.5" step="0.05" value="1.0"
+                <input id="audioRateSlider" type="range" min="0.25" max="2.5" step="0.05" value="1.0"
                   class="w-14 accent-amber-400 cursor-pointer h-1 bg-[#333] rounded focus:outline-none">
                 <span id="audioRateLabel" class="text-[11px] text-amber-300 font-bold w-9 text-right">1.00x</span>
                 <button id="btnPreservePitch" title="템포 변경 시 피치 유지 여부"
@@ -349,6 +350,13 @@
                   class="w-16 accent-purple-400 cursor-pointer h-1 bg-[#333] rounded focus:outline-none" title="음높이(반음) 독립 조절 (-12 ~ +12 st)">
                 <span id="audioPitchLabel" class="text-[11px] text-purple-300 font-bold w-8 text-right">0st</span>
                 <button id="btnResetPitch" title="피치 0st 초기화"
+                  class="px-1 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838] text-[10px] font-bold">0</button>
+                <span class="text-gray-600">|</span>
+                <span class="text-[11px] text-teal-300 font-bold">✨여운</span>
+                <input id="audioTailSlider" type="range" min="0" max="3.0" step="0.2" value="0"
+                  class="w-14 accent-teal-400 cursor-pointer h-1 bg-[#333] rounded focus:outline-none" title="원음 어택 유지 + 끝부분 잔향 여운 늘리기 (0 ~ +3.0s)">
+                <span id="audioTailLabel" class="text-[11px] text-teal-300 font-bold w-8 text-right">0.0s</span>
+                <button id="btnResetTail" title="여운 0s 초기화"
                   class="px-1 py-0.5 rounded bg-[#242424] hover:bg-[#333] text-gray-300 border border-[#383838] text-[10px] font-bold">0</button>
                 <button id="btnToggleReverse" title="현재 사운드를 거꾸로(역재생) 뒤집어서 미리듣기 및 내보내기 적용"
                   class="px-1.5 py-0.5 rounded bg-[#242424] text-gray-300 border border-[#383838] text-[11px] font-bold hover:bg-[#333] transition">

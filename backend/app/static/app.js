@@ -59,6 +59,7 @@ let currentPlaybackRate = 1.0;
 let currentPreservePitch = true;
 let currentReverse = false;
 let currentPitchSemitones = 0.0;
+let currentTailSec = 0.0;
 let audioUndoStack = [];
 let editingMemoSlotId = null;
 
@@ -69,6 +70,12 @@ function getCandidatePlaybackUrl(cand) {
   if (cand.reverse) params.set("reverse", "1");
   const pitch = Number(cand.pitch_semitones || 0);
   if (Math.abs(pitch) >= 0.1) params.set("pitch", pitch.toFixed(1));
+  const tail = Number(cand.tail_sec || 0);
+  if (tail >= 0.05) {
+    params.set("tail", tail.toFixed(1));
+    const outVal = Number(cand.audio_out || 0);
+    if (outVal > 0) params.set("out", outVal.toFixed(3));
+  }
   const qs = params.toString();
   return qs ? `${base}?${qs}` : base;
 }
@@ -351,7 +358,8 @@ function mainLoop(now) {
 
   // 2. Enforce Audio Trim Out Boundary
   if (!audioPlayer.paused && audioDuration > 0) {
-    const effectiveOut = audioOut > audioIn ? audioOut : audioDuration;
+    const baseOut = audioOut > audioIn ? audioOut : audioDuration;
+    const effectiveOut = (currentTailSec >= 0.05 && audioOut > audioIn) ? (baseOut + currentTailSec) : baseOut;
     if (audioPlayer.currentTime >= effectiveOut - 0.025) {
       if (loopMode === "audio" || (loopMode === "sync" && !sceneMediaType)) {
         audioPlayer.currentTime = audioIn;
@@ -453,6 +461,7 @@ async function decodeWaveformForCandidate(cand) {
   currentPreservePitch = cand.preserve_pitch !== 0;
   currentReverse = !!cand.reverse;
   currentPitchSemitones = Number(cand.pitch_semitones) || 0.0;
+  currentTailSec = Number(cand.tail_sec) || 0.0;
   audioUndoStack = [];
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
@@ -553,7 +562,7 @@ const audioRateLabel = document.getElementById("audioRateLabel");
 const btnPreservePitch = document.getElementById("btnPreservePitch");
 
 function applyAudioPlaybackSpeed() {
-  const r = Math.max(0.5, Math.min(2.5, Number(currentPlaybackRate) || 1.0));
+  const r = Math.max(0.25, Math.min(2.5, Number(currentPlaybackRate) || 1.0));
   currentPlaybackRate = r;
   audioPlayer.playbackRate = r;
   audioPlayer.preservesPitch = !!currentPreservePitch;
@@ -588,6 +597,12 @@ function applyAudioPlaybackSpeed() {
   const audioPitchLabel = document.getElementById("audioPitchLabel");
   if (audioPitchSlider) audioPitchSlider.value = p;
   if (audioPitchLabel) audioPitchLabel.textContent = `${p > 0 ? "+" : ""}${Number(p.toFixed(1))}st`;
+  const t = Math.max(0, Math.min(3.0, Number(currentTailSec) || 0.0));
+  currentTailSec = t;
+  const audioTailSlider = document.getElementById("audioTailSlider");
+  const audioTailLabel = document.getElementById("audioTailLabel");
+  if (audioTailSlider) audioTailSlider.value = t;
+  if (audioTailLabel) audioTailLabel.textContent = `${t.toFixed(1)}s`;
 }
 
 function updateAudioTrimUI() {
@@ -598,22 +613,25 @@ function updateAudioTrimUI() {
   audioOutHandle.style.left = `${outPct}%`;
 
   const selLen = Math.max(0, audioOut - audioIn);
-  const effLen = selLen / Math.max(0.25, currentPlaybackRate || 1.0);
+  const effLen = (selLen + currentTailSec) / Math.max(0.25, currentPlaybackRate || 1.0);
   const isFull = audioIn <= 0.01 && Math.abs(audioOut - audioDuration) <= 0.05;
-  const speedSuffix = Math.abs(currentPlaybackRate - 1.0) >= 0.01
+  const speedSuffix = (Math.abs(currentPlaybackRate - 1.0) >= 0.01 || currentTailSec >= 0.05)
     ? ` → 실효 ${effLen.toFixed(2)}s (${currentPlaybackRate.toFixed(2)}x)`
     : "";
   const pitchSuffix = Math.abs(currentPitchSemitones) >= 0.1
     ? ` · 🎵 ${currentPitchSemitones > 0 ? "+" : ""}${currentPitchSemitones.toFixed(1)}st`
     : "";
+  const tailSuffix = currentTailSec >= 0.05
+    ? ` · ✨여운 +${currentTailSec.toFixed(1)}s`
+    : "";
   const revPrefix = currentReverse ? "🔁 역재생 · " : "";
   audioTrimRangeLabel.textContent = isFull
-    ? `${revPrefix}구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)${speedSuffix}${pitchSuffix}`
-    : `${revPrefix}선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)${speedSuffix}${pitchSuffix}`;
+    ? `${revPrefix}구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)${speedSuffix}${pitchSuffix}${tailSuffix}`
+    : `${revPrefix}선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)${speedSuffix}${pitchSuffix}${tailSuffix}`;
 }
 
 function pushAudioUndo() {
-  audioUndoStack.push([audioIn, audioOut, currentPlaybackRate, currentPreservePitch, currentReverse, currentPitchSemitones]);
+  audioUndoStack.push([audioIn, audioOut, currentPlaybackRate, currentPreservePitch, currentReverse, currentPitchSemitones, currentTailSec]);
   if (audioUndoStack.length > 20) audioUndoStack.shift();
 }
 
@@ -626,6 +644,7 @@ async function saveAudioTrimToBackend() {
   cand.preserve_pitch = currentPreservePitch ? 1 : 0;
   cand.reverse = currentReverse ? 1 : 0;
   cand.pitch_semitones = Number((Number(currentPitchSemitones) || 0.0).toFixed(1));
+  cand.tail_sec = Number((Number(currentTailSec) || 0.0).toFixed(1));
   try {
     await fetch("/api/actions/trim_audio", {
       method: "POST",
@@ -639,6 +658,7 @@ async function saveAudioTrimToBackend() {
         preserve_pitch: cand.preserve_pitch,
         reverse: cand.reverse,
         pitch_semitones: cand.pitch_semitones,
+        tail_sec: cand.tail_sec,
       }),
     });
   } catch (e) {
@@ -838,19 +858,22 @@ async function reloadAudioForReverseToggle(cand, autoPlay = true) {
 
 document.getElementById("btnAudioUndo").addEventListener("click", async () => {
   if (audioUndoStack.length === 0) return;
-  const [prevIn, prevOut, prevRate, prevPitch, prevRev, prevPitchSt] = audioUndoStack.pop();
+  const [prevIn, prevOut, prevRate, prevPitch, prevRev, prevPitchSt, prevTail] = audioUndoStack.pop();
   const revChanged = prevRev !== undefined && prevRev !== currentReverse;
   const pitchStChanged = prevPitchSt !== undefined && Math.abs(prevPitchSt - currentPitchSemitones) >= 0.1;
+  const tailChanged = prevTail !== undefined && Math.abs(prevTail - currentTailSec) >= 0.05;
   audioIn = prevIn;
   audioOut = prevOut;
   if (prevRate !== undefined) currentPlaybackRate = prevRate;
   if (prevPitch !== undefined) currentPreservePitch = prevPitch;
   if (prevRev !== undefined) currentReverse = !!prevRev;
   if (prevPitchSt !== undefined) currentPitchSemitones = Number(prevPitchSt) || 0.0;
+  if (prevTail !== undefined) currentTailSec = Number(prevTail) || 0.0;
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
-  if ((revChanged || pitchStChanged) && currentIndex >= 0 && currentCandidates[currentIndex]) {
+  if ((revChanged || pitchStChanged || tailChanged) && currentIndex >= 0 && currentCandidates[currentIndex]) {
     currentCandidates[currentIndex].pitch_semitones = currentPitchSemitones;
+    currentCandidates[currentIndex].tail_sec = currentTailSec;
     await reloadAudioForReverseToggle(currentCandidates[currentIndex], false);
   } else {
     await saveAudioTrimToBackend();
@@ -862,16 +885,19 @@ document.getElementById("btnAudioReset").addEventListener("click", async () => {
   pushAudioUndo();
   const revChanged = currentReverse;
   const pitchStChanged = Math.abs(currentPitchSemitones) >= 0.1;
+  const tailChanged = currentTailSec >= 0.05;
   audioIn = 0.0;
   audioOut = audioDuration;
   currentPlaybackRate = 1.0;
   currentPreservePitch = true;
   currentReverse = false;
   currentPitchSemitones = 0.0;
+  currentTailSec = 0.0;
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
-  if ((revChanged || pitchStChanged) && currentIndex >= 0 && currentCandidates[currentIndex]) {
+  if ((revChanged || pitchStChanged || tailChanged) && currentIndex >= 0 && currentCandidates[currentIndex]) {
     currentCandidates[currentIndex].pitch_semitones = 0.0;
+    currentCandidates[currentIndex].tail_sec = 0.0;
     await reloadAudioForReverseToggle(currentCandidates[currentIndex], false);
   } else {
     await saveAudioTrimToBackend();
@@ -959,6 +985,39 @@ if (btnResetPitchEl) {
     if (currentIndex >= 0 && currentCandidates[currentIndex]) {
       const cand = currentCandidates[currentIndex];
       cand.pitch_semitones = 0.0;
+      await reloadAudioForReverseToggle(cand, !audioPlayer.paused);
+    }
+  });
+}
+
+const audioTailSliderEl = document.getElementById("audioTailSlider");
+if (audioTailSliderEl) {
+  audioTailSliderEl.addEventListener("input", () => {
+    currentTailSec = parseFloat(audioTailSliderEl.value) || 0.0;
+    applyAudioPlaybackSpeed();
+    updateAudioTrimUI();
+  });
+  audioTailSliderEl.addEventListener("change", async () => {
+    audioTailSliderEl.blur();
+    if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
+    const cand = currentCandidates[currentIndex];
+    cand.tail_sec = Number((parseFloat(audioTailSliderEl.value) || 0.0).toFixed(1));
+    currentTailSec = cand.tail_sec;
+    await reloadAudioForReverseToggle(cand, !audioPlayer.paused);
+  });
+}
+
+const btnResetTailEl = document.getElementById("btnResetTail");
+if (btnResetTailEl) {
+  btnResetTailEl.addEventListener("click", async () => {
+    if (currentTailSec < 0.05) return;
+    pushAudioUndo();
+    currentTailSec = 0.0;
+    applyAudioPlaybackSpeed();
+    updateAudioTrimUI();
+    if (currentIndex >= 0 && currentCandidates[currentIndex]) {
+      const cand = currentCandidates[currentIndex];
+      cand.tail_sec = 0.0;
       await reloadAudioForReverseToggle(cand, !audioPlayer.paused);
     }
   });
@@ -2246,11 +2305,14 @@ function renderCandidatesQueue() {
     const pitchPill = (c.pitch_semitones && Math.abs(c.pitch_semitones) >= 0.1)
       ? `<span class="ml-1.5 text-violet-300 font-bold">🎵${c.pitch_semitones > 0 ? "+" : ""}${Number(c.pitch_semitones).toFixed(1)}st</span>`
       : "";
+    const tailPill = (c.tail_sec && Number(c.tail_sec) >= 0.05)
+      ? `<span class="ml-1.5 text-teal-300 font-bold">✨+${Number(c.tail_sec).toFixed(1)}s</span>`
+      : "";
     infoDiv.innerHTML = `
       <span class="shrink-0 bg-[#242424] text-[#1DB954] font-mono font-bold text-xs px-2 py-1 rounded border border-[#333]">#${idx + 1}</span>
       <div class="truncate min-w-0">
         <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}${anchorTag}</div>
-        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}${revPill}${pitchPill}</div>
+        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}${revPill}${pitchPill}${tailPill}</div>
       </div>
     `;
 
@@ -4249,6 +4311,7 @@ function playReviewSynced() {
   currentPreservePitch = cs.preserve_pitch !== 0;
   currentReverse = !!cs.reverse;
   currentPitchSemitones = Number(cs.pitch_semitones || 0.0);
+  currentTailSec = Number(cs.tail_sec || 0.0);
   applyAudioPlaybackSpeed();
   audioIn = Number(cs.audio_in || 0.0);
   audioOut = Number(cs.audio_out || 0.0) || Number(cs.duration || 10.0);

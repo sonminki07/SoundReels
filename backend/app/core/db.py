@@ -179,6 +179,7 @@ def init_db():
         _ensure_column(c, "slot_candidates", "preserve_pitch", "INTEGER DEFAULT 1")
         _ensure_column(c, "slot_candidates", "reverse", "INTEGER DEFAULT 0")
         _ensure_column(c, "slot_candidates", "pitch_semitones", "REAL DEFAULT 0.0")
+        _ensure_column(c, "slot_candidates", "tail_sec", "REAL DEFAULT 0.0")
         _ensure_column(c, "sounds", "norm_gain", "REAL DEFAULT 1.0")
         
         # Performance Indices
