@@ -2348,6 +2348,17 @@ btnLoopMode.addEventListener("click", cycleLoopMode);
 // Action Handlers (Like, Similar, Mutate, Confirm, Export)
 // =========================================================================
 
+function sortCandidatesPrioritizeLiked(preserveSoundId = null) {
+  const prio = (st) => (st === "confirmed" ? 0 : st === "liked" ? 1 : 2);
+  currentCandidates.sort(
+    (a, b) => prio(a.candidate_status) - prio(b.candidate_status) || (Number(a.rank || 0) - Number(b.rank || 0))
+  );
+  if (preserveSoundId) {
+    const newIdx = currentCandidates.findIndex(c => c.sound_id === preserveSoundId);
+    if (newIdx >= 0) currentIndex = newIdx;
+  }
+}
+
 async function toggleLikeCurrent() {
   if (currentIndex < 0 || !currentCandidates[currentIndex] || !currentSlot) return;
   const cand = currentCandidates[currentIndex];
@@ -2365,6 +2376,7 @@ async function toggleLikeCurrent() {
     } else {
       removeFromCompareDock(cand.sound_id);
     }
+    sortCandidatesPrioritizeLiked(cand.sound_id);
     currentSlot.liked_count = currentCandidates.filter(c => c.candidate_status === "liked").length;
     renderCandidatesQueue();
     renderSlotsList();
@@ -2867,6 +2879,7 @@ async function confirmCurrent() {
     });
     cand.candidate_status = "confirmed";
     currentSlot.status = "confirmed";
+    sortCandidatesPrioritizeLiked(cand.sound_id);
     updateConfirmButtonUI(cand);
 
     renderCandidatesQueue();

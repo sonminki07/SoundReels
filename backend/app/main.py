@@ -460,7 +460,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             FROM slot_candidates sc
             JOIN sounds snd ON sc.sound_id = snd.id
             WHERE sc.slot_id = ? AND sc.status != 'skipped' AND snd.duration <= ?
-            ORDER BY sc.rank ASC
+            ORDER BY CASE sc.status WHEN 'confirmed' THEN 0 WHEN 'liked' THEN 1 ELSE 2 END ASC, sc.rank ASC
             """, (slot_id, max_dur))
         else:
             c.execute("""
@@ -473,7 +473,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             FROM slot_candidates sc
             JOIN sounds snd ON sc.sound_id = snd.id
             WHERE sc.slot_id = ? AND sc.status != 'skipped'
-            ORDER BY sc.rank ASC
+            ORDER BY CASE sc.status WHEN 'confirmed' THEN 0 WHEN 'liked' THEN 1 ELSE 2 END ASC, sc.rank ASC
             """, (slot_id,))
         candidates = []
         for r in c.fetchall():
