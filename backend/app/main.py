@@ -165,6 +165,12 @@ class AudioTrimRequest(BaseModel):
     audio_out: float = Field(ge=0.0)
     playback_rate: float = Field(default=1.0, ge=0.25, le=4.0)
     preserve_pitch: int = Field(default=1, ge=0, le=1)
+    reverse: int = Field(default=0, ge=0, le=1)
+
+class WorkNoteRequest(BaseModel):
+    work_memo: str = ""
+    assignee: str = ""
+    handoff_status: str = ""
 
 class OpenExternalRequest(BaseModel):
     url: str
@@ -200,11 +206,15 @@ def export_processed_audio_to_unity(
     audio_out: float = 0.0,
     playback_rate: float = 1.0,
     preserve_pitch: bool = True,
+    reverse: bool = False,
 ) -> bool:
     try:
         y, sr = librosa.load(str(src_path), sr=48000, mono=True)
         if len(y) == 0:
             return False
+
+        if reverse:
+            y = y[::-1].copy()
 
         # 1. Apply user-defined non-destructive trim range if specified
         has_custom_trim = (audio_in > 0.0) or (audio_out > 0.0)
@@ -257,6 +267,9 @@ def _enrich_slot_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     d["scene_out"] = float(d.get("scene_out") or 0.0)
     d["sound_offset"] = float(d.get("sound_offset") or 0.0)
     d["review_passed"] = bool(d.get("review_passed") or 0)
+    d["work_memo"] = str(d.get("work_memo") or "")
+    d["assignee"] = str(d.get("assignee") or "")
+    d["handoff_status"] = str(d.get("handoff_status") or "")
     return d
 
 # --- API Endpoints ---
@@ -305,6 +318,7 @@ def get_slots(max_dur: Optional[float] = Query(default=None, ge=0.0)):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               COALESCE(sc.reverse, 0) as reverse,
                snd.name, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id,
                COALESCE(snd.norm_gain, 1.0) as norm_gain
         FROM slot_candidates sc
@@ -349,6 +363,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                    COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+                   COALESCE(sc.reverse, 0) as reverse,
                    snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
@@ -361,6 +376,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                    COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                    COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+                   COALESCE(sc.reverse, 0) as reverse,
                    snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                    COALESCE(snd.norm_gain, 1.0) as norm_gain
             FROM slot_candidates sc
@@ -478,7 +494,7 @@ def scout_slot_from_scene(slot_id: str, req: SceneScoutRequest):
     }
 
 @app.get("/api/sounds/{sound_id}/audio")
-def get_sound_audio(sound_id: str):
+def get_sound_audio(sound_id: str, reverse: int = Query(default=0, ge=0, le=1)):
     validate_id(sound_id, "sound_id")
     local_path = (AUDIO_CACHE_DIR / f"{sound_id}.mp3").resolve()
 
@@ -520,6 +536,22 @@ def get_sound_audio(sound_id: str):
 
         if not local_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found in cache")
+
+    if reverse == 1:
+        rev_path = (AUDIO_CACHE_DIR / f"{sound_id}_rev.wav").resolve()
+        if not rev_path.is_relative_to(AUDIO_CACHE_DIR.resolve()):
+            raise HTTPException(status_code=403, detail="Forbidden path")
+        if not rev_path.exists() or rev_path.stat().st_mtime < local_path.stat().st_mtime:
+            tmp_rev = rev_path.with_suffix(".tmp.wav")
+            try:
+                y, sr = librosa.load(str(local_path), sr=48000, mono=True)
+                sf.write(str(tmp_rev), y[::-1].copy(), sr, subtype="PCM_16")
+                tmp_rev.replace(rev_path)
+            except Exception as rev_exc:
+                tmp_rev.unlink(missing_ok=True)
+                raise HTTPException(status_code=500, detail=f"Reverse audio generation failed: {rev_exc}")
+        return FileResponse(str(rev_path), media_type="audio/wav", headers={"Accept-Ranges": "bytes"})
+
     return FileResponse(str(local_path), media_type="audio/mpeg", headers={"Accept-Ranges": "bytes"})
 
 # --- Scene Media Upload / Stream / Trim Endpoints ---
@@ -625,6 +657,33 @@ def trim_slot_scene(slot_id: str, req: SceneTrimRequest):
         conn.commit()
     return {"status": "ok", "scene_in": req.scene_in, "scene_out": req.scene_out, "sound_offset": req.sound_offset}
 
+@app.post("/api/slots/{slot_id}/work_note")
+def update_slot_work_note(slot_id: str, req: WorkNoteRequest):
+    validate_id(slot_id, "slot_id")
+    allowed_statuses = {"", "todo", "in_progress", "needs_review", "ready"}
+    clean_status = (req.handoff_status or "").strip()
+    if clean_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Invalid handoff_status")
+    clean_memo = (req.work_memo or "").strip()
+    clean_assignee = (req.assignee or "").strip()
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("""
+        UPDATE slots
+        SET work_memo = ?, assignee = ?, handoff_status = ?
+        WHERE id = ?
+        """, (clean_memo, clean_assignee, clean_status, slot_id))
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Slot not found")
+        conn.commit()
+    return {
+        "status": "ok",
+        "slot_id": slot_id,
+        "work_memo": clean_memo,
+        "assignee": clean_assignee,
+        "handoff_status": clean_status,
+    }
+
 @app.post("/api/actions/trim_audio")
 def trim_candidate_audio(req: AudioTrimRequest):
     validate_id(req.slot_id, "slot_id")
@@ -636,9 +695,9 @@ def trim_candidate_audio(req: AudioTrimRequest):
         c = conn.cursor()
         c.execute("""
         UPDATE slot_candidates
-        SET audio_in = ?, audio_out = ?, playback_rate = ?, preserve_pitch = ?
+        SET audio_in = ?, audio_out = ?, playback_rate = ?, preserve_pitch = ?, reverse = ?
         WHERE slot_id = ? AND sound_id = ?
-        """, (req.audio_in, req.audio_out, req.playback_rate, req.preserve_pitch, req.slot_id, req.sound_id))
+        """, (req.audio_in, req.audio_out, req.playback_rate, req.preserve_pitch, req.reverse, req.slot_id, req.sound_id))
         if c.rowcount == 0:
             raise HTTPException(status_code=404, detail="Candidate not found")
         conn.commit()
@@ -648,6 +707,7 @@ def trim_candidate_audio(req: AudioTrimRequest):
         "audio_out": req.audio_out,
         "playback_rate": req.playback_rate,
         "preserve_pitch": req.preserve_pitch,
+        "reverse": req.reverse,
     }
 
 ALLOWED_SETTING_KEYS = {
@@ -872,7 +932,8 @@ def confirm_candidate(req: ConfirmRequest):
 
         c.execute("""
         SELECT COALESCE(audio_in, 0.0) as audio_in, COALESCE(audio_out, 0.0) as audio_out,
-               COALESCE(playback_rate, 1.0) as playback_rate, COALESCE(preserve_pitch, 1) as preserve_pitch
+               COALESCE(playback_rate, 1.0) as playback_rate, COALESCE(preserve_pitch, 1) as preserve_pitch,
+               COALESCE(reverse, 0) as reverse
         FROM slot_candidates WHERE slot_id = ? AND sound_id = ?
         """, (req.slot_id, req.sound_id))
         cand_row = c.fetchone()
@@ -917,6 +978,7 @@ def confirm_candidate(req: ConfirmRequest):
                     audio_out=float(cand_row["audio_out"]),
                     playback_rate=float(cand_row["playback_rate"]),
                     preserve_pitch=bool(cand_row["preserve_pitch"]),
+                    reverse=bool(cand_row["reverse"]),
                 )
                 exported_path = str(dest_file)
 
@@ -1113,11 +1175,14 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
         raw_dur = float(item.get("duration") or 0.0)
         rate = float(item.get("playback_rate") or 1.0)
         p_pitch = bool(item.get("preserve_pitch", 1))
+        is_rev = bool(item.get("reverse", 0))
         has_trim = (a_in > 0.0) or (a_out > 0.0)
         trim_desc = f"{a_in:.2f}s ~ {(a_out if a_out > a_in else raw_dur):.2f}s" if has_trim else f"전체 자동 무음제거 (원본 {raw_dur:.2f}s)"
         clip_len = (max(0.05, (a_out if a_out > a_in else raw_dur) - a_in) if has_trim else raw_dur)
         eff_len = clip_len / max(0.25, rate)
         speed_desc = f"{rate:.2f}x ({'피치유지' if p_pitch else '피치연동'})" if abs(rate - 1.0) >= 0.01 else "1.00x (원속도)"
+        if is_rev:
+            speed_desc = f"🔁 역재생 · {speed_desc}"
         rel_wav = f"Assets/Audio/SFX/{item['slot_id']}/{item['slot_id']}_01.wav"
 
         entry = {
@@ -1125,6 +1190,9 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
             "slot_id": item["slot_id"],
             "slot_name": item.get("slot_name") or item["slot_id"],
             "slot_memo": item.get("slot_memo") or "",
+            "work_memo": item.get("work_memo") or "",
+            "assignee": item.get("assignee") or "",
+            "handoff_status": item.get("handoff_status") or "",
             "output_wav": rel_wav,
             "sound_id": item["sound_id"],
             "sound_name": item["name"],
@@ -1135,12 +1203,14 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
             "trim": trim_desc,
             "playback_rate": round(rate, 2),
             "preserve_pitch": p_pitch,
+            "reverse": is_rev,
             "effective_duration": round(eff_len, 2),
         }
         entries.append(entry)
+        handoff_note = f" | 인수인계({entry['assignee'] or '공용'}): {entry['work_memo']}" if (entry["work_memo"] or entry["assignee"]) else ""
         lines.extend([
             f"[{idx:02d}] 용도/슬롯 : {entry['slot_name']} ({entry['slot_id']})",
-            f"     메모      : {entry['slot_memo']}",
+            f"     메모      : {entry['slot_memo']}{handoff_note}",
             f"     출력 파일 : {rel_wav}",
             f"     원본 음원 : {entry['sound_name']}",
             f"     출처 정보 : {source_desc}",
@@ -1166,7 +1236,9 @@ def preview_export_receipt(passed_only: bool = Query(default=False)):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               COALESCE(sc.reverse, 0) as reverse,
                s.name as slot_name, s.memo as slot_memo,
+               COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
         FROM slot_candidates sc
         JOIN slots s ON sc.slot_id = s.id
@@ -1195,7 +1267,9 @@ def batch_export_to_unity(req: BatchExportRequest):
         SELECT sc.slot_id, sc.sound_id,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               COALESCE(sc.reverse, 0) as reverse,
                s.name as slot_name, s.memo as slot_memo,
+               COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
                snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
         FROM slot_candidates sc
         JOIN slots s ON sc.slot_id = s.id
@@ -1220,6 +1294,7 @@ def batch_export_to_unity(req: BatchExportRequest):
                         audio_out=float(item["audio_out"]),
                         playback_rate=float(item["playback_rate"]),
                         preserve_pitch=bool(item["preserve_pitch"]),
+                        reverse=bool(item.get("reverse", 0)),
                     )
                     urls = resolve_source_urls(item)
                     credit_url = urls["original_source_url"] or item["source_url"] or "local://ai-generated"
@@ -1269,6 +1344,7 @@ def get_slot_trash(slot_id: str):
         SELECT sc.id as candidate_id, sc.slot_id, sc.sound_id, sc.score, sc.rank, sc.status as candidate_status,
                COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
                COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               COALESCE(sc.reverse, 0) as reverse,
                snd.name, snd.file_path, snd.duration, snd.license_type, snd.author, snd.source, snd.source_url, snd.source_id, snd.tags, snd.sha256,
                COALESCE(snd.norm_gain, 1.0) as norm_gain
         FROM slot_candidates sc

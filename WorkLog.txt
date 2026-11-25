@@ -381,3 +381,22 @@
      - 신규 활성 후보 음원 52개 추가 스테이징 (총 282개 활성 음원 전수 보존, 총 추적 음원 324개)
      - SQLite WAL 체크포인트(TRUNCATE) 및 데이터 무결성 검증 완료
 ================================================================================
+
+21. v2.4 슬롯 우클릭 인수인계 메모/진행 표시, 사운드 역재생 및 선택 음원(최종 채택 5 + 찜 45) 실사이트 라이선스 검수
+--------------------------------------------------------------------------------
+- 구현 내역:
+  1) 슬롯 우클릭 협업/인수인계 메모 (`db.py`, `main.py`, `index.html`, `app.js`):
+     - `slots` 테이블에 `work_memo`, `assignee`, `handoff_status` 컬럼 및 `POST /api/slots/{slot_id}/work_note` 추가
+     - 우측 슬롯 카드·총점검 리스트 우클릭(`contextmenu`) 및 상단 배너(`#currentSlotWorkNoteBanner`) 클릭 시 `#slotMemoModal` 오픈
+     - 진행 상태(`확인필요`/`작업중`/`인수요청`/`인수완료`), 담당자, 메모를 카드·헤더·총점검·영수증(`SOUNDREELS_RECEIPT.txt/json`)에 표시
+  2) 비파괴 사운드 역재생 (`db.py`, `main.py`, `index.html`, `app.js`):
+     - `slot_candidates.reverse` 컬럼, `/api/sounds/{sound_id}/audio?reverse=1` 캐시 역재생 WAV 서빙, `export_processed_audio_to_unity(..., reverse=...)` 추가
+     - 파형 하단 `#btnToggleReverse`(`🔁 역재생`) 버튼으로 즉시 뒤집힌 파형/구간 미리듣기 및 언두/초기화·Unity 내보내기·영수증 반영
+  3) 선택 음원(최종 채택 5건 + 찜 45건) 실사이트 라이선스 검수 (Browser 서브에이전트 2개 병렬 검증):
+     - 실제 `https://freesound.org` 개별 페이지 50건 전수 HTTP 200 확인 완료
+     - 최종 채택 5/5 `CC0 1.0` 확인 (단 `fs-125384`는 페이지 설명상 iPhone 잠금 해제음 지칭으로 필요시 순수 CC0 UI음 교체 권장)
+     - 찜 44/45 `CC0 1.0`, **1건(`fs-423831` "closing elevator doors 1", `crazymonke9`)이 `CC BY 4.0`(저작자 표시 필수)** 임을 확인·보고
+- 검증 결과 (QA 통과):
+  - `node --check backend/app/static/app.js` 및 Python `py_compile` 오류 0건
+  - `verify_v24.py` 및 `test_v12.py` 회귀 테스트 통과
+================================================================================

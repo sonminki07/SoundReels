@@ -56,7 +56,15 @@ let audioIn = 0.0;
 let audioOut = 0.0;
 let currentPlaybackRate = 1.0;
 let currentPreservePitch = true;
+let currentReverse = false;
 let audioUndoStack = [];
+let editingMemoSlotId = null;
+
+function getCandidatePlaybackUrl(cand) {
+  if (!cand) return "";
+  const base = cand.audio_url || `/api/sounds/${cand.sound_id}/audio`;
+  return cand.reverse ? `${base}?reverse=1` : base;
+}
 let audioDecodeAbort = null;
 let waveformDecodeSeq = 0;
 let isDraggingAudioHandle = null; // 'in' | 'out' | 'scrub' | null
@@ -436,13 +444,14 @@ async function decodeWaveformForCandidate(cand) {
   audioOut = cand.audio_out > 0 ? cand.audio_out : audioDuration;
   currentPlaybackRate = Number(cand.playback_rate) || 1.0;
   currentPreservePitch = cand.preserve_pitch !== 0;
+  currentReverse = !!cand.reverse;
   audioUndoStack = [];
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
 
   try {
     initAudioContext();
-    const resp = await fetch(cand.audio_url, { signal: audioDecodeAbort.signal });
+    const resp = await fetch(getCandidatePlaybackUrl(cand), { signal: audioDecodeAbort.signal });
     const buf = await resp.arrayBuffer();
     if (mySeq !== waveformDecodeSeq) return;
     const decoded = await audioCtx.decodeAudioData(buf);
@@ -558,6 +567,13 @@ function applyAudioPlaybackSpeed() {
       ? "px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[11px] font-bold hover:bg-emerald-900"
       : "px-1.5 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-700 text-[11px] font-bold hover:bg-amber-900";
   }
+  const btnReverse = document.getElementById("btnToggleReverse");
+  if (btnReverse) {
+    btnReverse.textContent = currentReverse ? "🔁 역재생 중" : "🔁 역재생";
+    btnReverse.className = currentReverse
+      ? "px-1.5 py-0.5 rounded bg-cyan-400 text-black border border-cyan-300 text-[11px] font-black transition"
+      : "px-1.5 py-0.5 rounded bg-[#242424] text-gray-300 border border-[#383838] text-[11px] font-bold hover:bg-[#333] transition";
+  }
 }
 
 function updateAudioTrimUI() {
@@ -573,13 +589,14 @@ function updateAudioTrimUI() {
   const speedSuffix = Math.abs(currentPlaybackRate - 1.0) >= 0.01
     ? ` → 실효 ${effLen.toFixed(2)}s (${currentPlaybackRate.toFixed(2)}x)`
     : "";
+  const revPrefix = currentReverse ? "🔁 역재생 · " : "";
   audioTrimRangeLabel.textContent = isFull
-    ? `구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)${speedSuffix}`
-    : `선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)${speedSuffix}`;
+    ? `${revPrefix}구간: 전체 (0.00s ~ ${audioDuration.toFixed(2)}s)${speedSuffix}`
+    : `${revPrefix}선택 구간: ${audioIn.toFixed(2)}s ~ ${audioOut.toFixed(2)}s (${selLen.toFixed(2)}s)${speedSuffix}`;
 }
 
 function pushAudioUndo() {
-  audioUndoStack.push([audioIn, audioOut, currentPlaybackRate, currentPreservePitch]);
+  audioUndoStack.push([audioIn, audioOut, currentPlaybackRate, currentPreservePitch, currentReverse]);
   if (audioUndoStack.length > 20) audioUndoStack.shift();
 }
 
@@ -590,6 +607,7 @@ async function saveAudioTrimToBackend() {
   cand.audio_out = audioOut;
   cand.playback_rate = Number(currentPlaybackRate.toFixed(2));
   cand.preserve_pitch = currentPreservePitch ? 1 : 0;
+  cand.reverse = currentReverse ? 1 : 0;
   try {
     await fetch("/api/actions/trim_audio", {
       method: "POST",
@@ -601,6 +619,7 @@ async function saveAudioTrimToBackend() {
         audio_out: Number(audioOut.toFixed(3)),
         playback_rate: cand.playback_rate,
         preserve_pitch: cand.preserve_pitch,
+        reverse: cand.reverse,
       }),
     });
   } catch (e) {
@@ -780,29 +799,79 @@ document.getElementById("btnAudioApply").addEventListener("click", async () => {
   triggerAudioFromIn();
 });
 
+async function reloadAudioForReverseToggle(cand, autoPlay = true) {
+  if (!cand) return;
+  await saveAudioTrimToBackend();
+  renderCandidatesQueue();
+  decodeWaveformForCandidate(cand);
+  audioPlayer.pause();
+  audioPlayer.src = getCandidatePlaybackUrl(cand);
+  audioPlayer.onloadedmetadata = () => {
+    if (!currentCandidates[currentIndex] || currentCandidates[currentIndex].sound_id !== cand.sound_id) return;
+    applyAudioGainNodes();
+    applyAudioPlaybackSpeed();
+    audioPlayer.currentTime = audioIn;
+    timeCurrent.textContent = formatTime(audioIn);
+    if (autoPlay) audioPlayer.play().catch(() => {});
+  };
+  audioPlayer.load();
+}
+
 document.getElementById("btnAudioUndo").addEventListener("click", async () => {
   if (audioUndoStack.length === 0) return;
-  const [prevIn, prevOut, prevRate, prevPitch] = audioUndoStack.pop();
+  const [prevIn, prevOut, prevRate, prevPitch, prevRev] = audioUndoStack.pop();
+  const revChanged = prevRev !== undefined && prevRev !== currentReverse;
   audioIn = prevIn;
   audioOut = prevOut;
   if (prevRate !== undefined) currentPlaybackRate = prevRate;
   if (prevPitch !== undefined) currentPreservePitch = prevPitch;
+  if (prevRev !== undefined) currentReverse = !!prevRev;
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
-  await saveAudioTrimToBackend();
+  if (revChanged && currentIndex >= 0 && currentCandidates[currentIndex]) {
+    await reloadAudioForReverseToggle(currentCandidates[currentIndex], false);
+  } else {
+    await saveAudioTrimToBackend();
+  }
 });
 
 document.getElementById("btnAudioReset").addEventListener("click", async () => {
   if (audioDuration <= 0) return;
   pushAudioUndo();
+  const revChanged = currentReverse;
   audioIn = 0.0;
   audioOut = audioDuration;
   currentPlaybackRate = 1.0;
   currentPreservePitch = true;
+  currentReverse = false;
   applyAudioPlaybackSpeed();
   updateAudioTrimUI();
-  await saveAudioTrimToBackend();
+  if (revChanged && currentIndex >= 0 && currentCandidates[currentIndex]) {
+    await reloadAudioForReverseToggle(currentCandidates[currentIndex], false);
+  } else {
+    await saveAudioTrimToBackend();
+  }
 });
+
+const btnToggleReverseEl = document.getElementById("btnToggleReverse");
+if (btnToggleReverseEl) {
+  btnToggleReverseEl.addEventListener("click", async () => {
+    if (currentIndex < 0 || !currentCandidates[currentIndex]) return;
+    const cand = currentCandidates[currentIndex];
+    pushAudioUndo();
+    const dur = audioDuration || cand.duration || 0;
+    const prevIn = audioIn;
+    const prevOut = audioOut;
+    currentReverse = !currentReverse;
+    if (dur > 0 && (prevIn > 0.01 || Math.abs(prevOut - dur) > 0.05)) {
+      audioIn = Math.max(0, Number((dur - prevOut).toFixed(3)));
+      audioOut = Math.min(dur, Math.max(audioIn + 0.05, Number((dur - prevIn).toFixed(3))));
+    }
+    applyAudioPlaybackSpeed();
+    updateAudioTrimUI();
+    await reloadAudioForReverseToggle(cand, true);
+  });
+}
 
 document.querySelectorAll(".speed-preset-btn").forEach(btn => {
   btn.addEventListener("click", async () => {
@@ -1603,6 +1672,99 @@ async function loadSlots() {
   }
 }
 
+const HANDOFF_STATUS_META = {
+  todo: { label: "📝 확인필요", cls: "bg-amber-950/90 text-amber-300 border border-amber-700" },
+  in_progress: { label: "🔄 작업중", cls: "bg-sky-950/90 text-sky-300 border border-sky-700" },
+  needs_review: { label: "👀 인수요청", cls: "bg-indigo-950/90 text-indigo-200 border border-indigo-600" },
+  ready: { label: "✅ 인수완료", cls: "bg-emerald-950/90 text-emerald-300 border border-emerald-700" },
+};
+
+function updateCurrentSlotWorkNoteUI() {
+  const banner = document.getElementById("currentSlotWorkNoteBanner");
+  if (!banner) return;
+  if (!currentSlot || (!currentSlot.work_memo && !currentSlot.assignee && !currentSlot.handoff_status)) {
+    banner.classList.add("hidden");
+    banner.classList.remove("inline-flex");
+    banner.textContent = "";
+    return;
+  }
+  const st = HANDOFF_STATUS_META[currentSlot.handoff_status];
+  const parts = [];
+  if (st) parts.push(st.label);
+  if (currentSlot.assignee) parts.push(`👤 ${currentSlot.assignee}`);
+  if (currentSlot.work_memo) parts.push(`📝 ${currentSlot.work_memo}`);
+  banner.textContent = parts.join(" · ");
+  banner.classList.remove("hidden");
+  banner.classList.add("inline-flex");
+}
+
+function openSlotMemoModal(slotId) {
+  const slot = allSlots.find(s => s.id === slotId);
+  if (!slot) return;
+  editingMemoSlotId = slotId;
+  const modal = document.getElementById("slotMemoModal");
+  const titleEl = document.getElementById("slotMemoTitle");
+  const statusEl = document.getElementById("slotMemoStatusSelect");
+  const assigneeEl = document.getElementById("slotMemoAssignee");
+  const inputEl = document.getElementById("slotMemoInput");
+  if (!modal) return;
+  if (titleEl) titleEl.textContent = `${slot.name} — 작업 인수인계 메모`;
+  if (statusEl) statusEl.value = slot.handoff_status || "";
+  if (assigneeEl) assigneeEl.value = slot.assignee || "";
+  if (inputEl) inputEl.value = slot.work_memo || "";
+  modal.classList.remove("hidden");
+  if (inputEl) setTimeout(() => inputEl.focus(), 20);
+}
+
+function closeSlotMemoModal() {
+  editingMemoSlotId = null;
+  const modal = document.getElementById("slotMemoModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function saveSlotMemoFromModal(clearAll = false) {
+  if (!editingMemoSlotId) return;
+  const statusEl = document.getElementById("slotMemoStatusSelect");
+  const assigneeEl = document.getElementById("slotMemoAssignee");
+  const inputEl = document.getElementById("slotMemoInput");
+  const payload = clearAll
+    ? { work_memo: "", assignee: "", handoff_status: "" }
+    : {
+        work_memo: (inputEl?.value || "").trim(),
+        assignee: (assigneeEl?.value || "").trim(),
+        handoff_status: statusEl?.value || "",
+      };
+  try {
+    const res = await fetch(`/api/slots/${editingMemoSlotId}/work_note`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(`메모 저장 실패: ${data.detail || "오류"}`);
+      return;
+    }
+    const target = allSlots.find(s => s.id === editingMemoSlotId);
+    if (target) {
+      target.work_memo = data.work_memo;
+      target.assignee = data.assignee;
+      target.handoff_status = data.handoff_status;
+    }
+    if (currentSlot && currentSlot.id === editingMemoSlotId) {
+      currentSlot.work_memo = data.work_memo;
+      currentSlot.assignee = data.assignee;
+      currentSlot.handoff_status = data.handoff_status;
+      updateCurrentSlotWorkNoteUI();
+    }
+    closeSlotMemoModal();
+    renderSlotsList();
+    if (isReviewMode) renderReviewChecklist();
+  } catch (e) {
+    alert(`메모 저장 오류: ${e}`);
+  }
+}
+
 async function selectSlot(slotId, autoPlay = true) {
   const slot = allSlots.find(s => s.id === slotId);
   if (!slot) return;
@@ -1618,6 +1780,7 @@ async function selectSlot(slotId, autoPlay = true) {
   currentSlotName.textContent = slot.name;
   currentSlotCategory.textContent = slot.category.toUpperCase();
   currentSlotMemo.textContent = slot.memo;
+  updateCurrentSlotWorkNoteUI();
   activeSlotBadge.textContent = `${slot.name} (${slot.candidate_count || 0} 후보)`;
 
   // Load slot's attached scene media if any
@@ -1749,7 +1912,7 @@ function playCandidate(index, autoPlay = true) {
   audioPlayer.pause();
   applyAudioGainNodes();
   applyAudioPlaybackSpeed();
-  audioPlayer.src = cand.audio_url;
+  audioPlayer.src = getCandidatePlaybackUrl(cand);
   audioPlayer.onloadedmetadata = () => {
     if (!currentCandidates[currentIndex] || currentCandidates[currentIndex].sound_id !== cand.sound_id) return;
     applyAudioGainNodes();
@@ -1851,15 +2014,28 @@ function renderSlotsList() {
 
     const sceneIcon = s.scene_media_url ? "🎬 " : "";
     const titleColor = isConfirmed ? "text-emerald-300" : (likedCount > 0 ? "text-amber-200" : "text-gray-200");
+    const handoffMeta = HANDOFF_STATUS_META[s.handoff_status];
+    if (handoffMeta) {
+      badges.unshift(`<span class="${handoffMeta.cls} text-[10px] px-1.5 py-0.5 rounded-full font-bold">${handoffMeta.label}</span>`);
+    }
+    const noteLine = (s.work_memo || s.assignee)
+      ? `<div class="text-[11px] text-indigo-300 truncate mt-0.5">📝 ${s.assignee ? `[${s.assignee}] ` : ""}${s.work_memo || "담당자 지정됨"}</div>`
+      : "";
+    item.title = "클릭: 슬롯 열기 · 우클릭: 인수인계 메모 / 진행 표시";
     item.innerHTML = `
       <div class="truncate flex-1 pr-2 min-w-0">
         <div class="font-bold ${titleColor} truncate">${isConfirmed ? "✅ " : ""}${sceneIcon}${s.name}</div>
         <div class="text-xs text-gray-400 truncate">${s.memo}</div>
+        ${noteLine}
       </div>
-      <div class="shrink-0 flex items-center gap-1">${badges.join("")}</div>
+      <div class="shrink-0 flex items-center gap-1 flex-wrap justify-end max-w-[130px]">${badges.join("")}</div>
     `;
 
     item.addEventListener("click", () => selectSlot(s.id));
+    item.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      openSlotMemoModal(s.id);
+    });
     container.appendChild(item);
   });
   container.scrollTop = previousScroll;
@@ -1893,11 +2069,14 @@ function renderCandidatesQueue() {
     const speedPill = (c.playback_rate && Math.abs(c.playback_rate - 1.0) >= 0.01)
       ? `<span class="ml-1.5 text-amber-300 font-bold">⚡${Number(c.playback_rate).toFixed(2)}x</span>`
       : "";
+    const revPill = c.reverse
+      ? `<span class="ml-1.5 text-cyan-300 font-bold">🔁역재생</span>`
+      : "";
     infoDiv.innerHTML = `
       <span class="shrink-0 bg-[#242424] text-[#1DB954] font-mono font-bold text-xs px-2 py-1 rounded border border-[#333]">#${idx + 1}</span>
       <div class="truncate min-w-0">
         <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}${anchorTag}</div>
-        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}</div>
+        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}${revPill}</div>
       </div>
     `;
 
@@ -3640,8 +3819,12 @@ function renderReviewChecklist() {
           : `<span class="bg-[#2c2c2c] text-gray-400 text-[10px] px-2 py-0.5 rounded-full">⚠️ 미확정</span>`);
 
     const sndLabel = s.confirmed_sound
-      ? `🔊 ${s.confirmed_sound.name}`
+      ? `🔊 ${s.confirmed_sound.name}${s.confirmed_sound.reverse ? " (🔁역재생)" : ""}`
       : (s.liked_count > 0 ? `⭐ 찜 후보 ${s.liked_count}개` : "확정된 소리 없음");
+    const hMeta = HANDOFF_STATUS_META[s.handoff_status];
+    const hLine = (hMeta || s.work_memo || s.assignee)
+      ? `<div class="text-[11px] text-indigo-300 truncate">${hMeta ? hMeta.label + " " : ""}${s.assignee ? `[${s.assignee}] ` : ""}${s.work_memo || ""}</div>`
+      : "";
 
     row.innerHTML = `
       <div class="flex items-center justify-between gap-2">
@@ -3649,8 +3832,13 @@ function renderReviewChecklist() {
         ${statePill}
       </div>
       <div class="text-[11px] text-gray-400 truncate">${sndLabel}</div>
+      ${hLine}
     `;
     row.addEventListener("click", () => selectReviewSlot(s.id, true));
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      openSlotMemoModal(s.id);
+    });
     reviewChecklist.appendChild(row);
   });
 }
@@ -3708,7 +3896,10 @@ function selectReviewSlot(slotId, autoPlay = true) {
     const hasTrim = (cs.audio_in > 0) || (cs.audio_out > 0);
     const trimStr = hasTrim ? `${Number(cs.audio_in).toFixed(2)}s ~ ${Number(trimEnd).toFixed(2)}s` : `전체 자동 무음제거 (${Number(cs.duration).toFixed(2)}s)`;
     const rate = Number(cs.playback_rate || 1.0);
-    const rateStr = `${rate.toFixed(2)}x (${cs.preserve_pitch ? "피치유지" : "피치연동"})`;
+    const rateStr = `${cs.reverse ? "🔁 역재생 · " : ""}${rate.toFixed(2)}x (${cs.preserve_pitch ? "피치유지" : "피치연동"})`;
+    const handoffSummary = (slot.work_memo || slot.assignee || slot.handoff_status)
+      ? `<div class="col-span-2 text-indigo-200 bg-indigo-950/40 border border-indigo-800/60 rounded-lg px-2.5 py-1.5 mt-1">📝 <b>인수인계:</b> ${HANDOFF_STATUS_META[slot.handoff_status]?.label || ""} ${slot.assignee ? `[${slot.assignee}] ` : ""}${slot.work_memo || ""}</div>`
+      : "";
 
     revSpecBody.innerHTML = `
       <div><span class="text-gray-400">확정 음원:</span> <span class="text-white font-bold">${cs.name}</span></div>
@@ -3716,6 +3907,7 @@ function selectReviewSlot(slotId, autoPlay = true) {
       <div class="col-span-2 truncate"><span class="text-gray-400">원본 출처:</span> <span class="text-sky-300 font-mono">${srcLabel}</span></div>
       <div><span class="text-gray-400">자르기 구간:</span> <span class="text-gray-200 font-mono">${trimStr}</span></div>
       <div><span class="text-gray-400">배속 / 피치:</span> <span class="text-amber-300 font-mono font-bold">${rateStr}</span></div>
+      ${handoffSummary}
     `;
     btnReviewTogglePass.disabled = false;
     if (slot.review_passed) {
@@ -3761,11 +3953,12 @@ function playReviewSynced() {
   applyAudioGainNodes();
   currentPlaybackRate = Number(cs.playback_rate || 1.0);
   currentPreservePitch = cs.preserve_pitch !== 0;
+  currentReverse = !!cs.reverse;
   applyAudioPlaybackSpeed();
   audioIn = Number(cs.audio_in || 0.0);
   audioOut = Number(cs.audio_out || 0.0) || Number(cs.duration || 10.0);
 
-  audioPlayer.src = `/api/sounds/${cs.sound_id}/audio`;
+  audioPlayer.src = `/api/sounds/${cs.sound_id}/audio${cs.reverse ? "?reverse=1" : ""}`;
   const triggerSnd = () => {
     applyAudioPlaybackSpeed();
     audioPlayer.currentTime = audioIn;
@@ -3974,6 +4167,7 @@ window.addEventListener("keydown", (e) => {
   }
 
   if (e.key === "Escape") {
+    closeSlotMemoModal();
     closeSimilarPromptModal();
     closeReceiptModal();
     closeSettingsModal();
@@ -3981,6 +4175,8 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  const slotMemoModalEl = document.getElementById("slotMemoModal");
+  if (slotMemoModalEl && !slotMemoModalEl.classList.contains("hidden")) return;
   const simModal = document.getElementById("similarPromptModal");
   if (simModal && !simModal.classList.contains("hidden")) return;
   if (receiptModal && !receiptModal.classList.contains("hidden")) return;
@@ -4084,6 +4280,29 @@ window.addEventListener("keyup", (e) => {
 }, true);
 
 // Initial load & poll
+if (document.getElementById("currentSlotWorkNoteBanner")) {
+  document.getElementById("currentSlotWorkNoteBanner").addEventListener("click", () => {
+    if (currentSlot) openSlotMemoModal(currentSlot.id);
+  });
+}
+if (document.getElementById("btnCloseSlotMemo")) {
+  document.getElementById("btnCloseSlotMemo").addEventListener("click", closeSlotMemoModal);
+}
+if (document.getElementById("btnCancelSlotMemo")) {
+  document.getElementById("btnCancelSlotMemo").addEventListener("click", closeSlotMemoModal);
+}
+if (document.getElementById("btnSaveSlotMemo")) {
+  document.getElementById("btnSaveSlotMemo").addEventListener("click", () => saveSlotMemoFromModal(false));
+}
+if (document.getElementById("btnClearSlotMemo")) {
+  document.getElementById("btnClearSlotMemo").addEventListener("click", () => saveSlotMemoFromModal(true));
+}
+if (document.getElementById("slotMemoModal")) {
+  document.getElementById("slotMemoModal").addEventListener("click", (e) => {
+    if (e.target.id === "slotMemoModal") closeSlotMemoModal();
+  });
+}
+
 loadSettingsFromServer().then(() => loadSlots());
 setInterval(loadSlots, 10000);
 setTimeout(() => checkForUpdate(true), 2000);
