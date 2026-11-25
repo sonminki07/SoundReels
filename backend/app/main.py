@@ -571,6 +571,7 @@ def get_slot_candidates(slot_id: str, max_dur: Optional[float] = Query(default=N
             item["source_kind"] = urls["source_kind"]
             item["original_source_url"] = urls["original_source_url"]
             item["catalog_url"] = urls["catalog_url"]
+            item.update(_get_license_permissions(item["sound_id"], item.get("license_type", "CC0")))
             candidates.append(item)
     return {"slot_id": slot_id, "candidates": candidates}
 
@@ -911,6 +912,12 @@ def trim_candidate_audio(req: AudioTrimRequest):
 
     with get_db_context() as conn:
         c = conn.cursor()
+        c.execute("SELECT license_type FROM sounds WHERE id = ?", (req.sound_id,))
+        snd_meta = c.fetchone()
+        if snd_meta:
+            perm = _get_license_permissions(req.sound_id, snd_meta["license_type"])
+            if not perm["modify_ok"]:
+                raise HTTPException(status_code=403, detail=perm["lock_reason"] or "저작권으로 인해 수정이 불가합니다.")
         c.execute("""
         UPDATE slot_candidates
         SET audio_in = ?, audio_out = ?, playback_rate = ?, preserve_pitch = ?, reverse = ?, pitch_semitones = ?, tail_sec = ?
@@ -1177,6 +1184,9 @@ def confirm_candidate(req: ConfirmRequest):
         if not snd_row:
             raise HTTPException(status_code=404, detail="Sound record not found")
         snd = dict(snd_row)
+        perm = _get_license_permissions(req.sound_id, snd.get("license_type", "CC0"))
+        if not perm["commercial_ok"]:
+            raise HTTPException(status_code=403, detail=perm["lock_reason"] or "저작권 제한으로 인해 확정할 수 없습니다.")
         urls = resolve_source_urls(snd)
         credit_url = urls["original_source_url"] or snd["source_url"]
 
@@ -1332,6 +1342,15 @@ def mutate_sound(req: MutateRequest):
     if not src_file.exists():
         raise HTTPException(status_code=404, detail="Sound not found in cache")
 
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("SELECT license_type FROM sounds WHERE id = ?", (req.sound_id,))
+        snd_chk = c.fetchone()
+        if snd_chk:
+            perm = _get_license_permissions(req.sound_id, snd_chk["license_type"])
+            if not perm["modify_ok"]:
+                raise HTTPException(status_code=403, detail=perm["lock_reason"] or "저작권으로 인해 변형이 불가합니다.")
+
     try:
         y, sr = librosa.load(str(src_file), sr=48000, mono=True)
         mutated = librosa.effects.pitch_shift(y, sr=sr, n_steps=2.0)
@@ -1379,6 +1398,37 @@ def mutate_sound(req: MutateRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mutation error: {e}")
+
+def _get_license_permissions(sound_id: str, license_type: str) -> Dict[str, Any]:
+    """Computes commercial/modification/attribution permissions and lock reason for a sound."""
+    raw_id = str(sound_id or "").replace("fs-", "")
+    lic = str(license_type or "CC0").upper()
+    commercial_ok = True
+    modify_ok = True
+    attribution_required = False
+    reasons: List[str] = []
+
+    if raw_id == "125384":
+        commercial_ok = False
+        modify_ok = False
+        reasons.append("🔒 저작권·상표권 고위험(Apple iPhone 원음)으로 인해 사용 및 수정이 잠겨 있습니다")
+    if "ND" in lic:
+        modify_ok = False
+        reasons.append("🔒 저작권(ND 변경금지)으로 인해 자르기·피치·배속·여운·역재생 수정이 불가합니다")
+    if "NC" in lic:
+        commercial_ok = False
+        reasons.append("🔒 저작권(NC 비상업)으로 인해 상업 게임 확정·추출이 불가합니다")
+    if "BY" in lic and "CC0" not in lic:
+        attribution_required = True
+
+    return {
+        "commercial_ok": commercial_ok,
+        "modify_ok": modify_ok,
+        "attribution_required": attribution_required,
+        "lock_reason": " · ".join(reasons),
+        "license_notice": _get_license_notice(sound_id, license_type),
+    }
+
 
 def _get_license_notice(sound_id: str, license_type: str) -> str:
     """Returns per-sound license / trademark / usage notice if applicable."""
@@ -1800,6 +1850,9 @@ def export_single_slot(req: SingleExportRequest):
     exported_rows: List[Dict[str, Any]] = []
     total = len(items)
     for idx, item in enumerate(items, start=1):
+        perm = _get_license_permissions(item["sound_id"], item.get("license_type", "CC0"))
+        if not perm["commercial_ok"]:
+            raise HTTPException(status_code=403, detail=perm["lock_reason"] or "저작권 제한으로 인해 추출할 수 없습니다.")
         fname = f"{req.slot_id}.wav" if total == 1 else f"{req.slot_id}_{idx:02d}.wav"
         dest_file = (target_dir / fname).resolve()
         if not dest_file.is_relative_to(target_dir):

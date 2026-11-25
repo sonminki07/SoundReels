@@ -644,6 +644,7 @@ function pushAudioUndo() {
 async function saveAudioTrimToBackend() {
   if (!currentSlot || currentIndex < 0 || !currentCandidates[currentIndex]) return;
   const cand = currentCandidates[currentIndex];
+  if (cand.modify_ok === false) return;
   cand.audio_in = audioIn;
   cand.audio_out = audioOut;
   cand.playback_rate = Number(currentPlaybackRate.toFixed(2));
@@ -2128,6 +2129,7 @@ function playCandidate(index, autoPlay = true) {
     btnLike.classList.remove("text-yellow-400", "border-yellow-500");
   }
   updateConfirmButtonUI(cand);
+  applyCandidateLicenseLock(cand);
 
   const dock = getActiveCompareDock();
   document.querySelectorAll(".dock-btn").forEach((b, dIdx) => {
@@ -2314,11 +2316,16 @@ function renderCandidatesQueue() {
     const tailPill = (c.tail_sec && Number(c.tail_sec) >= 0.05)
       ? `<span class="ml-1.5 text-teal-300 font-bold">✨+${Number(c.tail_sec).toFixed(1)}s</span>`
       : "";
+    const lockPill = (c.commercial_ok === false)
+      ? `<span class="ml-1.5 text-red-300 font-bold">🔒사용불가</span>`
+      : (c.modify_ok === false
+          ? `<span class="ml-1.5 text-red-300 font-bold">🔒수정금지</span>`
+          : (c.attribution_required ? `<span class="ml-1.5 text-amber-300 font-bold">⚠️표기필수</span>` : ""));
     infoDiv.innerHTML = `
       <span class="shrink-0 bg-[#242424] text-[#1DB954] font-mono font-bold text-xs px-2 py-1 rounded border border-[#333]">#${idx + 1}</span>
       <div class="truncate min-w-0">
         <div class="font-bold text-gray-100 truncate">${likeIcon}${c.name}${confirmedTag}${anchorTag}</div>
-        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}${revPill}${pitchPill}${tailPill}</div>
+        <div class="text-xs text-gray-400 font-mono">${c.duration.toFixed(1)}s · ${Math.round(c.score * 100)}% Match${trimPill}${speedPill}${revPill}${pitchPill}${tailPill}${lockPill}</div>
       </div>
     `;
 
@@ -2454,6 +2461,58 @@ async function toggleLikeCurrent() {
   } catch (e) {
     console.error("Like error:", e);
   }
+}
+
+function applyCandidateLicenseLock(cand) {
+  const banner = document.getElementById("candLicenseLockBanner");
+  const modifyOk = !cand || cand.modify_ok !== false;
+  const commercialOk = !cand || cand.commercial_ok !== false;
+  const attrReq = !!(cand && cand.attribution_required);
+  const notice = (cand && cand.license_notice) || "";
+  const lockReason = (cand && cand.lock_reason) || "";
+
+  if (banner) {
+    banner.classList.add("hidden");
+    banner.className = "hidden text-[11px] font-bold px-3 py-1.5 rounded-lg border truncate shrink-0";
+    if (cand && (!commercialOk || !modifyOk)) {
+      banner.textContent = lockReason || "🔒 저작권 제한으로 인해 사용 또는 수정이 잠겨 있습니다.";
+      banner.classList.remove("hidden");
+      banner.classList.add("bg-red-950/85", "border-red-700", "text-red-200");
+    } else if (cand && (attrReq || notice)) {
+      banner.textContent = notice || "⚠️ CC BY 라이선스: 게임 크레딧에 원작자 표기가 필요합니다.";
+      banner.classList.remove("hidden");
+      banner.classList.add("bg-amber-950/75", "border-amber-700/80", "text-amber-200");
+    }
+  }
+
+  const editControlIds = [
+    "audioRateSlider", "audioPitchSlider", "audioTailSlider",
+    "btnPreservePitch", "btnResetPitch", "btnResetTail", "btnToggleReverse",
+    "btnAudioSetIn", "btnAudioSetOut", "btnAudioApply", "btnAudioUndo", "btnAudioReset",
+    "btnMutate",
+  ];
+  editControlIds.forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.disabled = !modifyOk;
+    el.classList.toggle("opacity-40", !modifyOk);
+    el.classList.toggle("cursor-not-allowed", !modifyOk);
+    if (!modifyOk) el.title = lockReason || "저작권으로 인해 수정이 불가합니다.";
+  });
+  document.querySelectorAll(".speed-preset-btn").forEach((btn) => {
+    btn.disabled = !modifyOk;
+    btn.classList.toggle("opacity-40", !modifyOk);
+    btn.classList.toggle("cursor-not-allowed", !modifyOk);
+  });
+
+  ["btnConfirm", "btnExportSingleSound"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.disabled = !commercialOk;
+    el.classList.toggle("opacity-40", !commercialOk);
+    el.classList.toggle("cursor-not-allowed", !commercialOk);
+    if (!commercialOk) el.title = lockReason || "저작권으로 인해 확정/추출이 불가합니다.";
+  });
 }
 
 function syncActiveSlotCompareDockFromCandidates() {
@@ -2919,6 +2978,7 @@ async function unconfirmCurrent() {
       currentSlot.status = data.new_slot_status || "has_candidates";
       if (currentSlot.status !== "confirmed") currentSlot.review_passed = false;
       updateConfirmButtonUI(cand);
+  applyCandidateLicenseLock(cand);
       renderCandidatesQueue();
       renderSlotsList();
       updateProgress();
@@ -2951,6 +3011,7 @@ async function confirmCurrent() {
     currentSlot.status = "confirmed";
     sortCandidatesPrioritizeLiked(cand.sound_id);
     updateConfirmButtonUI(cand);
+  applyCandidateLicenseLock(cand);
 
     renderCandidatesQueue();
     renderSlotsList();
