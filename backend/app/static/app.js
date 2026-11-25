@@ -2165,6 +2165,9 @@ function renderSlotsList() {
     item.className = `slot-item p-2.5 rounded-lg flex items-center justify-between cursor-pointer text-[13px] transition ${cardStyle}`;
 
     const badges = [];
+    if (s.is_exported) {
+      badges.push(`<span class="bg-sky-950/90 text-sky-300 border border-sky-700/80 text-[10px] px-1.5 py-0.5 rounded-full font-bold" title="추출 완료 (${s.exported_at || ''})">📦 추출✓</span>`);
+    }
     if (likedCount > 0) {
       badges.push(`<span class="bg-amber-950/80 text-amber-300 border border-amber-700/70 text-[10px] px-1.5 py-0.5 rounded-full font-bold">⭐ 찜${likedCount}</span>`);
     }
@@ -2896,6 +2899,7 @@ document.getElementById("btnUnityExport").addEventListener("click", async () => 
     });
     const data = await res.json();
     if (res.ok) {
+      await loadSlots();
       openReceiptModal(data.receipt_text || "", `저장 위치: ${data.receipt_path || unityPath} (총 ${data.exported_count}개 WAV 내보냄)`);
     } else {
       alert(`내보내기 실패: ${data.detail || "오류 발생"}`);
@@ -2919,6 +2923,7 @@ async function exportConfirmedBundle(passedOnly = false, btnEl = null) {
     });
     const data = await res.json();
     if (res.ok) {
+      await loadSlots();
       openReceiptModal(
         data.receipt_text || "",
         `추출 폴더: ${data.destination} (총 ${data.exported_count}개 WAV + 주의사항 문서 저장 완료)`
@@ -2943,6 +2948,47 @@ if (btnExportConfirmedBundle) {
 const btnReviewExportConfirmedBundle = document.getElementById("btnReviewExportConfirmedBundle");
 if (btnReviewExportConfirmedBundle) {
   btnReviewExportConfirmedBundle.addEventListener("click", () => exportConfirmedBundle(false, btnReviewExportConfirmedBundle));
+}
+
+const btnExportSingleSound = document.getElementById("btnExportSingleSound");
+if (btnExportSingleSound) {
+  btnExportSingleSound.addEventListener("click", async () => {
+    if (!currentSlot) {
+      alert("먼저 슬롯을 선택해주세요.");
+      return;
+    }
+    const cand = currentIndex >= 0 ? currentCandidates[currentIndex] : null;
+    const prevText = btnExportSingleSound.textContent;
+    btnExportSingleSound.disabled = true;
+    btnExportSingleSound.textContent = "⏳ 추출 중...";
+    try {
+      await saveAudioTrimToBackend();
+      const res = await fetch("/api/export/single", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          slot_id: currentSlot.id,
+          sound_id: cand ? cand.sound_id : null,
+          open_folder: true,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        await loadSlots();
+        openReceiptModal(
+          data.receipt_text || "",
+          `단일 추출 완료: ${data.destination}\\${(data.files || []).join(", ")}`
+        );
+      } else {
+        alert(`단일 추출 실패: ${data.detail || "오류 발생"}`);
+      }
+    } catch (e) {
+      alert(`단일 추출 오류: ${e}`);
+    } finally {
+      btnExportSingleSound.disabled = false;
+      btnExportSingleSound.textContent = prevText;
+    }
+  });
 }
 
 // =========================================================================

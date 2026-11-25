@@ -828,6 +828,7 @@ def trim_candidate_audio(req: AudioTrimRequest):
         ))
         if c.rowcount == 0:
             raise HTTPException(status_code=404, detail="Candidate not found")
+        c.execute("UPDATE slots SET is_exported = 0 WHERE id = ?", (req.slot_id,))
         conn.commit()
     return {
         "status": "ok",
@@ -1164,9 +1165,10 @@ def unconfirm_candidate(req: UnconfirmRequest):
             )
             has_cands = c.fetchone()["cnt"] > 0
             new_slot_status = "has_candidates" if has_cands else "pending"
-            c.execute("UPDATE slots SET status = ?, review_passed = 0 WHERE id = ?", (new_slot_status, req.slot_id))
+            c.execute("UPDATE slots SET status = ?, review_passed = 0, is_exported = 0 WHERE id = ?", (new_slot_status, req.slot_id))
         else:
             new_slot_status = "confirmed"
+            c.execute("UPDATE slots SET is_exported = 0 WHERE id = ?", (req.slot_id,))
 
         conn.commit()
     return {"status": "ok", "slot_id": req.slot_id, "new_slot_status": new_slot_status}
@@ -1463,6 +1465,10 @@ def batch_export_to_unity(req: BatchExportRequest):
                     credit_url = urls["original_source_url"] or item["source_url"] or "local://ai-generated"
                     f.write(f'[{item["slot_name"]}] "{item["name"]}" ({credit_url}) by {item["author"]} - License: {item["license_type"]}\n')
                     exported_rows.append(item)
+        exported_slot_ids = sorted({it["slot_id"] for it in exported_rows})
+        for esid in exported_slot_ids:
+            c.execute("UPDATE slots SET is_exported = 1, exported_at = datetime('now', 'localtime') WHERE id = ?", (esid,))
+        conn.commit()
 
     receipt_bundle = _format_receipt_entries(exported_rows, passed_only=req.passed_only)
     receipt_txt_path = target_root / "SOUNDREELS_RECEIPT.txt"
@@ -1556,6 +1562,13 @@ def export_confirmed_bundle(req: ConfirmedBundleRequest):
                 item["custom_rel_wav"] = fname
                 exported_rows.append(item)
 
+    if exported_rows:
+        with get_db_context() as conn:
+            c = conn.cursor()
+            for esid in sorted({it["slot_id"] for it in exported_rows}):
+                c.execute("UPDATE slots SET is_exported = 1, exported_at = datetime('now', 'localtime') WHERE id = ?", (esid,))
+            conn.commit()
+
     receipt_bundle = _format_receipt_entries(exported_rows, passed_only=req.passed_only)
     receipt_txt_path = target_dir / "SOUNDREELS_RECEIPT.txt"
     receipt_json_path = target_dir / "SOUNDREELS_RECEIPT.json"
@@ -1614,6 +1627,113 @@ def export_confirmed_bundle(req: ConfirmedBundleRequest):
         "receipt_path": str(receipt_txt_path),
         "receipt_json_path": str(receipt_json_path),
         "notices_path": str(notices_md_path),
+        "receipt_text": receipt_bundle["receipt_text"],
+    }
+
+
+class SingleExportRequest(BaseModel):
+    slot_id: str
+    sound_id: Optional[str] = None
+    output_dir: Optional[str] = None
+    open_folder: bool = True
+
+
+@app.post("/api/export/single")
+def export_single_slot(req: SingleExportRequest):
+    """Exports a single slot/sound WAV (with trim/tempo/pitch/reverse applied) and marks slot as exported."""
+    validate_id(req.slot_id, "slot_id")
+    if req.sound_id is not None:
+        validate_id(req.sound_id, "sound_id")
+
+    target_dir = (
+        Path(req.output_dir).resolve()
+        if (req.output_dir or "").strip()
+        else (ROOT_DIR / "exports" / "confirmed_sfx").resolve()
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    with get_db_context() as conn:
+        c = conn.cursor()
+        if req.sound_id:
+            c.execute("""
+            SELECT sc.slot_id, sc.sound_id,
+                   COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+                   COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+                   s.name as slot_name, s.memo as slot_memo,
+                   COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
+                   snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
+            FROM slot_candidates sc
+            JOIN slots s ON sc.slot_id = s.id
+            JOIN sounds snd ON sc.sound_id = snd.id
+            WHERE sc.slot_id = ? AND sc.sound_id = ?
+            """, (req.slot_id, req.sound_id))
+            items = [dict(r) for r in c.fetchall()]
+        else:
+            c.execute("""
+            SELECT sc.slot_id, sc.sound_id,
+                   COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+                   COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+                   COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+                   s.name as slot_name, s.memo as slot_memo,
+                   COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
+                   snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
+            FROM slot_candidates sc
+            JOIN slots s ON sc.slot_id = s.id
+            JOIN sounds snd ON sc.sound_id = snd.id
+            WHERE sc.slot_id = ? AND sc.status = 'confirmed'
+            ORDER BY sc.rank ASC
+            """, (req.slot_id,))
+            items = [dict(r) for r in c.fetchall()]
+
+    if not items:
+        raise HTTPException(status_code=404, detail="추출할 사운드 후보를 찾을 수 없습니다.")
+
+    exported_rows: List[Dict[str, Any]] = []
+    total = len(items)
+    for idx, item in enumerate(items, start=1):
+        fname = f"{req.slot_id}.wav" if total == 1 else f"{req.slot_id}_{idx:02d}.wav"
+        dest_file = (target_dir / fname).resolve()
+        if not dest_file.is_relative_to(target_dir):
+            raise HTTPException(status_code=403, detail="Path traversal detected")
+        src_file = AUDIO_CACHE_DIR / f"{item['sound_id']}.mp3"
+        if not src_file.exists():
+            raise HTTPException(status_code=404, detail="Source audio file missing from cache")
+        ok = export_processed_audio_to_unity(
+            src_file,
+            dest_file,
+            audio_in=float(item["audio_in"]),
+            audio_out=float(item["audio_out"]),
+            playback_rate=float(item["playback_rate"]),
+            preserve_pitch=bool(item["preserve_pitch"]),
+            reverse=bool(item.get("reverse", 0)),
+            pitch_semitones=float(item.get("pitch_semitones") or 0.0),
+        )
+        if ok:
+            item["custom_rel_wav"] = fname
+            exported_rows.append(item)
+
+    if not exported_rows:
+        raise HTTPException(status_code=500, detail="WAV 파일 추출에 실패했습니다.")
+
+    with get_db_context() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE slots SET is_exported = 1, exported_at = datetime('now', 'localtime') WHERE id = ?", (req.slot_id,))
+        conn.commit()
+
+    receipt_bundle = _format_receipt_entries(exported_rows, passed_only=False)
+    if req.open_folder and os.name == "nt":
+        try:
+            os.startfile(str(target_dir))
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "slot_id": req.slot_id,
+        "exported_count": len(exported_rows),
+        "destination": str(target_dir),
+        "files": [it["custom_rel_wav"] for it in exported_rows],
         "receipt_text": receipt_bundle["receipt_text"],
     }
 
