@@ -2905,6 +2905,46 @@ document.getElementById("btnUnityExport").addEventListener("click", async () => 
   }
 });
 
+async function exportConfirmedBundle(passedOnly = false, btnEl = null) {
+  const prevText = btnEl ? btnEl.textContent : "";
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = "⏳ WAV 추출 중...";
+  }
+  try {
+    const res = await fetch("/api/export/confirmed_bundle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ passed_only: passedOnly, open_folder: true }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      openReceiptModal(
+        data.receipt_text || "",
+        `추출 폴더: ${data.destination} (총 ${data.exported_count}개 WAV + 주의사항 문서 저장 완료)`
+      );
+    } else {
+      alert(`확정 WAV 추출 실패: ${data.detail || "오류 발생"}`);
+    }
+  } catch (e) {
+    alert(`확정 WAV 추출 오류: ${e}`);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = prevText;
+    }
+  }
+}
+
+const btnExportConfirmedBundle = document.getElementById("btnExportConfirmedBundle");
+if (btnExportConfirmedBundle) {
+  btnExportConfirmedBundle.addEventListener("click", () => exportConfirmedBundle(false, btnExportConfirmedBundle));
+}
+const btnReviewExportConfirmedBundle = document.getElementById("btnReviewExportConfirmedBundle");
+if (btnReviewExportConfirmedBundle) {
+  btnReviewExportConfirmedBundle.addEventListener("click", () => exportConfirmedBundle(false, btnReviewExportConfirmedBundle));
+}
+
 // =========================================================================
 // Player Events & Controls
 // =========================================================================

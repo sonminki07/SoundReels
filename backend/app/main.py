@@ -1275,6 +1275,30 @@ def mutate_sound(req: MutateRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Mutation error: {e}")
 
+def _get_license_notice(sound_id: str, license_type: str) -> str:
+    """Returns per-sound license / trademark / usage notice if applicable."""
+    raw_id = str(sound_id or "").replace("fs-", "")
+    lic = str(license_type or "CC0").upper()
+    known = {
+        "125384": "🔴 고위험: Apple iPhone 잠금 해제 원음(상표/저작권 침해 위험, 상용 사용 중단 권고)",
+        "423831": "⚠️ 필수 표기: CC BY 4.0 (게임 크레딧에 원작자 crazymonke9 및 출처 표기 필수)",
+        "351256": "⚠️ 조건 유의: Kinoton 프로필 약관상 원본 오디오 단독 재배포/재판매 금지 (게임 내 사용·변조 가능)",
+        "636578": "ℹ️ 참고: #243170 파생음 (원작자 AI 학습 금지 안내 / 일반 게임 SFX 사용·변조 가능)",
+        "182365": "ℹ️ 표기 주의: 하드웨어 녹음 (인게임·크레딧에 'Samsung' 상표명 노출 지양)",
+        "328243": "ℹ️ 표기 주의: 악기 프리셋 녹음 (인게임·크레딧에 'Yamaha' 상표명 노출 지양)",
+        "732816": "ℹ️ 참고: 물리 버튼 녹음 (순수 CC0 1.0 · 인게임에 'Yamaha' 상표명 노출만 지양)",
+        "238958": "ℹ️ 참고: 2024-06-11부 CC BY → CC0 1.0 전환 확인 완료",
+    }
+    if raw_id in known:
+        return known[raw_id]
+    if "NC" in lic:
+        return "🔴 사용 불가: 비상업(NC) 라이선스"
+    if "ND" in lic:
+        return "🔴 수정 금지: 변경금지(ND) 라이선스"
+    if "CC-BY" in lic or "CC BY" in lic:
+        return "⚠️ 필수 표기: CC BY 라이선스 (원작자 크레딧 표기 필수)"
+    return ""
+
 def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = False) -> Dict[str, Any]:
     """Builds structured receipt entries and formatted Korean receipt text."""
     from datetime import datetime
@@ -1316,7 +1340,8 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
             speed_desc = f"{speed_desc} · 피치 {pitch_st:+.1f}st"
         if is_rev:
             speed_desc = f"🔁 역재생 · {speed_desc}"
-        rel_wav = f"Assets/Audio/SFX/{item['slot_id']}/{item['slot_id']}_01.wav"
+        rel_wav = item.get("custom_rel_wav") or f"Assets/Audio/SFX/{item['slot_id']}/{item['slot_id']}_01.wav"
+        notice = _get_license_notice(item["sound_id"], item.get("license_type", "CC0"))
 
         entry = {
             "no": idx,
@@ -1332,6 +1357,7 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
             "source_kind": kind,
             "source_url": src_url,
             "license_type": item.get("license_type", "CC0"),
+            "license_notice": notice,
             "author": item.get("author", "Unknown"),
             "trim": trim_desc,
             "playback_rate": round(rate, 2),
@@ -1349,8 +1375,10 @@ def _format_receipt_entries(rows: List[Dict[str, Any]], passed_only: bool = Fals
             f"     원본 음원 : {entry['sound_name']}",
             f"     출처 정보 : {source_desc}",
             f"     편집/배속 : 자르기 [{trim_desc}] · 배속 [{speed_desc}] · 예상 길이 [{eff_len:.2f}s] · -1.0dBFS WAV",
-            "--------------------------------------------------------------------------------",
         ])
+        if notice:
+            lines.append(f"     주의 표기 : {notice}")
+        lines.append("--------------------------------------------------------------------------------")
 
     if not entries:
         lines.append("(내보낼 확정 또는 패스 완료 항목이 없습니다.)")
@@ -1460,6 +1488,132 @@ def batch_export_to_unity(req: BatchExportRequest):
         "destination": str(dest_base),
         "receipt_path": str(receipt_txt_path),
         "receipt_json_path": str(receipt_json_path),
+        "receipt_text": receipt_bundle["receipt_text"],
+    }
+
+
+class ConfirmedBundleRequest(BaseModel):
+    output_dir: Optional[str] = None
+    passed_only: bool = False
+    open_folder: bool = True
+
+
+@app.post("/api/export/confirmed_bundle")
+def export_confirmed_bundle(req: ConfirmedBundleRequest):
+    """Exports all confirmed sounds with trim/tempo/pitch/reverse applied to a standalone WAV folder + notice docs."""
+    target_dir = (
+        Path(req.output_dir).resolve()
+        if (req.output_dir or "").strip()
+        else (ROOT_DIR / "exports" / "confirmed_sfx").resolve()
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    exported_rows: List[Dict[str, Any]] = []
+    with get_db_context() as conn:
+        c = conn.cursor()
+        extra_where = "AND COALESCE(s.review_passed, 0) = 1" if req.passed_only else ""
+        c.execute(f"""
+        SELECT sc.slot_id, sc.sound_id,
+               COALESCE(sc.audio_in, 0.0) as audio_in, COALESCE(sc.audio_out, 0.0) as audio_out,
+               COALESCE(sc.playback_rate, 1.0) as playback_rate, COALESCE(sc.preserve_pitch, 1) as preserve_pitch,
+               COALESCE(sc.reverse, 0) as reverse, COALESCE(sc.pitch_semitones, 0.0) as pitch_semitones,
+               s.name as slot_name, s.memo as slot_memo,
+               COALESCE(s.work_memo, '') as work_memo, COALESCE(s.assignee, '') as assignee, COALESCE(s.handoff_status, '') as handoff_status,
+               snd.name, snd.duration, snd.author, snd.source, snd.source_url, snd.source_id, snd.license_type
+        FROM slot_candidates sc
+        JOIN slots s ON sc.slot_id = s.id
+        JOIN sounds snd ON sc.sound_id = snd.id
+        WHERE sc.status = 'confirmed' {extra_where}
+        ORDER BY s.created_at ASC, sc.rank ASC
+        """)
+        confirmed_items = [dict(r) for r in c.fetchall()]
+
+    slot_totals: Dict[str, int] = {}
+    for it in confirmed_items:
+        slot_totals[it["slot_id"]] = slot_totals.get(it["slot_id"], 0) + 1
+    slot_seen: Dict[str, int] = {}
+
+    for item in confirmed_items:
+        sid = item["slot_id"]
+        slot_seen[sid] = slot_seen.get(sid, 0) + 1
+        fname = f"{sid}.wav" if slot_totals[sid] == 1 else f"{sid}_{slot_seen[sid]:02d}.wav"
+        dest_file = (target_dir / fname).resolve()
+        if not dest_file.is_relative_to(target_dir):
+            raise HTTPException(status_code=403, detail="Path traversal detected")
+        src_file = AUDIO_CACHE_DIR / f"{item['sound_id']}.mp3"
+        if src_file.exists():
+            ok = export_processed_audio_to_unity(
+                src_file,
+                dest_file,
+                audio_in=float(item["audio_in"]),
+                audio_out=float(item["audio_out"]),
+                playback_rate=float(item["playback_rate"]),
+                preserve_pitch=bool(item["preserve_pitch"]),
+                reverse=bool(item.get("reverse", 0)),
+                pitch_semitones=float(item.get("pitch_semitones") or 0.0),
+            )
+            if ok:
+                item["custom_rel_wav"] = fname
+                exported_rows.append(item)
+
+    receipt_bundle = _format_receipt_entries(exported_rows, passed_only=req.passed_only)
+    receipt_txt_path = target_dir / "SOUNDREELS_RECEIPT.txt"
+    receipt_json_path = target_dir / "SOUNDREELS_RECEIPT.json"
+    notices_md_path = target_dir / "LICENSE_NOTICES.md"
+
+    receipt_txt_path.write_text(receipt_bundle["receipt_text"], encoding="utf-8")
+    receipt_json_path.write_text(
+        json.dumps(
+            {
+                "generated_at": receipt_bundle["generated_at"],
+                "passed_only": req.passed_only,
+                "exported_count": len(exported_rows),
+                "items": receipt_bundle["entries"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    notice_lines = [
+        "# SoundReels 확정 사운드 추출 및 주의 표기 안내",
+        "",
+        f"- 생성 시각: {receipt_bundle['generated_at']}",
+        f"- 추출 WAV 수: **{len(exported_rows)}개** (`-1.0dBFS` 정규화 · 피치/템포/트림/역재생 적용 완료)",
+        "",
+        "## ⚠️ 주의 표기가 필요한 확정 음원",
+        "",
+    ]
+    flagged_entries = [e for e in receipt_bundle["entries"] if e.get("license_notice")]
+    if flagged_entries:
+        for e in flagged_entries:
+            notice_lines.append(
+                f"- **`{e['output_wav']}`** ({e['slot_name']} · `{e['sound_name']}`): {e['license_notice']} — {e['source_url']}"
+            )
+    else:
+        notice_lines.append("- 특이 주의사항이 있는 확정 음원이 없습니다. (전원 순수 CC0)")
+
+    notice_lines.extend(["", "## 📦 전체 추출 파일 목록", ""])
+    for e in receipt_bundle["entries"]:
+        notice_lines.append(
+            f"- `{e['output_wav']}` | {e['slot_name']} | `{e['sound_name']}` ({e['license_type']}) | {e['source_url']}"
+        )
+    notices_md_path.write_text("\n".join(notice_lines) + "\n", encoding="utf-8")
+
+    if req.open_folder and os.name == "nt":
+        try:
+            os.startfile(str(target_dir))
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "exported_count": len(exported_rows),
+        "destination": str(target_dir),
+        "receipt_path": str(receipt_txt_path),
+        "receipt_json_path": str(receipt_json_path),
+        "notices_path": str(notices_md_path),
         "receipt_text": receipt_bundle["receipt_text"],
     }
 

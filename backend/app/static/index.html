@@ -494,11 +494,14 @@
     </div>
 
     <!-- Unity Project Export Bar (Also scales height cleanly) -->
-    <div class="flex items-stretch gap-2.5 shrink-0 h-full max-h-[72px] my-auto">
+    <div class="flex items-stretch gap-2 shrink-0 h-full max-h-[72px] my-auto">
       <input id="unityPathInput" type="text" placeholder="Unity 프로젝트 경로 (예: C:/MyGame/)"
-        class="w-64 bg-[#181818] border border-[#333] text-[13px] text-white px-3.5 rounded-lg outline-none focus:border-[#1DB954] h-full">
-      <button id="btnUnityExport" class="bg-[#242424] hover:bg-[#333] text-white border border-[#444] px-5 rounded-lg text-[13px] font-bold flex items-center gap-1.5 transition h-full shrink-0">
+        class="w-56 bg-[#181818] border border-[#333] text-[13px] text-white px-3 rounded-lg outline-none focus:border-[#1DB954] h-full">
+      <button id="btnUnityExport" class="bg-[#242424] hover:bg-[#333] text-white border border-[#444] px-4 rounded-lg text-[13px] font-bold flex items-center gap-1.5 transition h-full shrink-0">
         <span>Unity 내보내기</span>
+      </button>
+      <button id="btnExportConfirmedBundle" title="Unity 경로 없이 확정된 모든 사운드를 피치/템포/트림 적용 WAV + 주의사항 문서로 즉시 추출" class="bg-[#1DB954] hover:bg-[#1ed760] text-black px-4 rounded-lg text-[13px] font-black flex items-center gap-1.5 transition h-full shrink-0">
+        <span>📦 확정 WAV 추출</span>
       </button>
     </div>
   </footer>
@@ -521,6 +524,9 @@
           class="w-60 bg-[#121212] border border-[#383838] text-xs text-white px-3 py-1.5 rounded-lg outline-none focus:border-[#1DB954]">
         <button id="btnPreviewReceipt" class="px-3.5 py-1.5 rounded-lg bg-[#242424] hover:bg-[#333] text-sky-300 border border-sky-900/60 text-xs font-bold">
           🧾 영수증 미리보기
+        </button>
+        <button id="btnReviewExportConfirmedBundle" class="px-3.5 py-1.5 rounded-lg bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-700 text-xs font-bold">
+          📦 확정 WAV 일괄 추출
         </button>
         <button id="btnReviewExportPassed" class="px-4 py-1.5 rounded-lg bg-[#1DB954] hover:bg-[#1ed760] text-black text-xs font-black">
           🚀 패스 완료 내보내기 & 영수증 저장

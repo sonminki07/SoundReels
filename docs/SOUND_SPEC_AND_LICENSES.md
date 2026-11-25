@@ -15,17 +15,19 @@
 | 신규 추가·탐색 슬롯 | **3개** | `중간보스 움직이는 소리`, `슬라임 움직이는 소리`, `탭을 눌렀을 때 로딩음` |
 | 라이브 저작권 검증 | **20 / 20건** | 전원 Freesound `CC0 1.0` 확인 (**단, 1건 고위험 사용 중단 권고**) |
 
-> [!CAUTION]
-> **고위험 음원 교체 권고 — `#125384` (`Iphone.wav` / 슬롯 `sfx_elevator_button`)**  
-> Freesound 표기는 `CC0 1.0`이나, 원문 설명에 *"The unlocking sound of an Apple iPhone."*가 명시된 Apple Inc. 독점 UI 사운드입니다. 상용 출시 시 저작권·상표권 분쟁 위험이 있으므로 제외하고, 동일 슬롯에 함께 확정된 **`#273143` (`Button press.wav` by `ZvinbergsA`, FL Studio 합성음, 순수 CC0 1.0)** 만 사용하는 것을 권장합니다.
+> [!NOTE]
+> **고위험 음원 교체 완료 — `#125384` (`Iphone.wav`) → `#732816` (`Soft Button/Switch Press`)**  
+> 기존 `sfx_elevator_button`에 확정되어 있던 Apple iPhone 잠금 해제 원음 `#125384`는 확정 목록에서 제외되었고, **`#732816` (`Soft Button/Switch Press` by `SirBagel`, 순수 CC0 1.0)** 으로 교체 확정되었습니다. (라이브 HTTP 200 검증 완료)
 
 > [!WARNING]
-> **중·저위험 및 조건 유의 음원 5건**  
-> 1. **`#351256` (`Deep Whoosh #1`, Kinoton)** — 프로필 자체 약관(`https://freesound.org/people/Kinoton/`)상 상업 게임 이용 및 변조/레이어링은 허용되나, 원본 음원 단독 재판매·재배포(YouTube/SoundCloud/사운드보드 등)는 금지됩니다. 또한 `sfx_mob_female_projectile` 메모에는 `#395368` 확정으로 명시되어 있습니다.  
-> 2. **`#636578` (`Cutting Power`, swag1773)** — `#243170` (`Metro Scratch`, unfa, CC0) 파생 음원이며 원작자 프로필에 생성형 AI 학습 금지 안내가 있으나, 일반 상업 게임 SFX 사용은 CC0로 허용됩니다.  
-> 3. **`#182365` (`Samsung V40 - 5400rpm - BB`, Klerrp)** — 삼성 하드디스크 구동음 녹음으로 인게임 UI/크레딧에 `Samsung` 상표명 노출을 피하십시오.  
-> 4. **`#328243` (`Message Notification`, UnderlinedDesigns)** — `Yamaha P95` 디지털 피아노 오르간 프리셋 녹음으로 인게임 UI/크레딧에 `Yamaha` 상표명 노출을 피하십시오.  
-> 5. **`#238958` (`DSLR Camera Shots`, qubodup)** — `2024-06-11`부로 `CC BY` → `CC0 1.0`으로 전환되었음이 라이브 페이지에서 확인되었습니다.
+> **주의 표기가 필요한 음원 목록 (확정 및 찜 포함)**  
+> 1. **`#423831` (`closing elevator doors 1`, crazymonke9 — `sfx_elevator_door_close` `⭐ 찜` #1번)**: 현재 DB 내 유일한 **`CC BY 4.0`** 음원입니다. 상업 사용/편집은 가능하나 게임 내 **원작자·출처 크레딧 표기 필수**입니다.  
+> 2. **`#351256` (`Deep Whoosh #1`, Kinoton — `sfx_mob_female_projectile` 확정 #2번)**: `CC0 1.0`이나 프로필 약관(`https://freesound.org/people/Kinoton/`)상 게임 내 SFX 사용·변조는 허용, **원본 파일 단독 재배포/재판매 금지**입니다. (메모 지정 순수 CC0 `#395368` 사용 권장)  
+> 3. **`#636578` (`Cutting Power`, swag1773 — `sfx_midboss_death_shutdown` 확정 #2번)**: `#243170` 파생음이며 원작자 프로필에 생성형 AI 학습 금지 안내가 있습니다. 일반 상업 게임 SFX 사용·편집은 가능.  
+> 4. **`#182365` (`Samsung V40 - 5400rpm - BB`, Klerrp — `sfx_env_platform_move` 확정 #5번)**: 하드웨어 녹음으로 인게임/크레딧에 **`Samsung` 상표명 노출 지양**.  
+> 5. **`#328243` (`Message Notification`, UnderlinedDesigns — `sfx_ui_message_alert` 확정 #1번)**: 악기 프리셋 녹음으로 인게임/크레딧에 **`Yamaha` 상표명 노출 지양**.  
+> 6. **`#732816` (`Soft Button/Switch Press`, SirBagel — `sfx_elevator_button` 확정 #1번)**: 물리 버튼 녹음(순수 `CC0 1.0`). 설명상 `Yamaha` 건반 버튼 언급만 있으므로 상표명 노출만 지양.  
+> 7. **`#238958` (`DSLR Camera Shots`, qubodup — `sfx_item_tracker` 확정 #1번)**: `2024-06-11`부로 `CC BY` → `CC0 1.0` 전환 확인 완료.
 
 ---
 
@@ -39,7 +41,7 @@
 | 2 | `sfx_dash_wind` | 대시 소리 | `fast simple chop 5.aif` (`dave.des`) | https://freesound.org/s/127197/ | 전체 (`0.50s`) · `1.00x` · `0.0st` | - | 🟢 **CC0 1.0** (안전) |
 | 3 | `sfx_dash_wind` | 대시 소리 | `fast simple chop 1.aif` (`dave.des`) | https://freesound.org/s/127196/ | 전체 (`0.39s`) · `1.00x` · `0.0st` | - | 🟢 **CC0 1.0** (안전) |
 | 4 | `sfx_elevator_bell` | 엘리베이터 도착음 (띵~) | `Door Bell Rings` (`LanDub`) | https://freesound.org/s/182879/ | `0.07s ~ 0.76s` · `1.00x` · `0.0st` | `ready` · 조금 길게 하고 한번만 띵 | 🟢 **CC0 1.0** (캠코더 녹음, 안전) |
-| 5 | `sfx_elevator_button` | 엘리베이터 층 버튼 누름음 | `Iphone.wav` (`thegoose09`) | https://freesound.org/s/125384/ | `3.72s ~ 5.02s` · `1.00x` · `0.0st` | - | 🔴 **CC0 1.0 표기 / 고위험 (Apple UI 사운드 → 폐기 권장)** |
+| 5 | `sfx_elevator_button` | 엘리베이터 층 버튼 누름음 | `Soft Button/Switch Press` (`SirBagel`) | https://freesound.org/s/732816/ | `1.58s ~ 1.99s` · `1.00x` · `0.0st` | 교체 확정 (`#125384` 제외) | 🟢 **CC0 1.0** (물리 버튼 녹음, 상표명 미노출 권장) |
 | 6 | `sfx_elevator_button` | 엘리베이터 층 버튼 누름음 | `Button press.wav` (`ZvinbergsA`) | https://freesound.org/s/273143/ | 전체 (`0.93s`) · `1.00x` · `0.0st` | - | 🟢 **CC0 1.0** (FL Studio 합성음, 대체 권장) |
 | 7 | `sfx_elevator_door_close` | 엘리베이터 문 닫히는 소리 | `ElevatorDoor2.wav` (`tiptoe84`) | https://freesound.org/s/155897/ | 전체 (`6.02s`) · `1.00x` · `0.0st` | - | 🟢 **CC0 1.0** (원 설명은 문 열림 녹음, 안전) |
 | 8 | `sfx_elevator_door_open` | 엘리베이터 문 열리는 소리 | `Elevator Door opens and closes` (`NachtmahrTV`) | https://freesound.org/s/556699/ | `0.00s ~ 4.20s` · `1.00x` · `0.0st` | - | 🟢 **CC0 1.0** (안전) |
