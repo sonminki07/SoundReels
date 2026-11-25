@@ -368,7 +368,13 @@ function mainLoop(now) {
         // Pause and wait for the scene loop to restart
         audioPlayer.pause();
         audioPlayer.currentTime = audioIn;
-      } else if (loopMode === "once") {
+      } else if (loopMode === "single") {
+        audioPlayer.pause();
+        audioPlayer.currentTime = audioIn;
+      } else if (loopMode === "single") {
+    audioPlayer.pause();
+    audioPlayer.currentTime = audioIn;
+  } else if (loopMode === "once") {
         audioPlayer.pause();
         if (currentIndex + 1 < currentCandidates.length) {
           playCandidate(currentIndex + 1);
@@ -2386,20 +2392,22 @@ function updateProgress() {
 // =========================================================================
 
 function cycleLoopMode() {
+  btnLoopMode.classList.remove("text-emerald-400", "text-amber-400", "text-cyan-300", "text-gray-300");
   if (loopMode === "sync") {
     loopMode = "audio";
     btnLoopMode.textContent = "🔁 🔊 소리만 반복";
-    btnLoopMode.classList.remove("text-emerald-400");
     btnLoopMode.classList.add("text-amber-400");
   } else if (loopMode === "audio") {
+    loopMode = "single";
+    btnLoopMode.textContent = "1️⃣ 1회 정지";
+    btnLoopMode.classList.add("text-cyan-300");
+  } else if (loopMode === "single") {
     loopMode = "once";
     btnLoopMode.textContent = "⏭️ 1회 후 다음";
-    btnLoopMode.classList.remove("text-amber-400");
     btnLoopMode.classList.add("text-gray-300");
   } else {
     loopMode = "sync";
     btnLoopMode.textContent = "🔁 🎬+🔊 싱크 반복";
-    btnLoopMode.classList.remove("text-gray-300");
     btnLoopMode.classList.add("text-emerald-400");
   }
 }
@@ -3095,6 +3103,9 @@ audioPlayer.addEventListener("ended", () => {
   if (loopMode === "audio" || (loopMode === "sync" && !sceneMediaType)) {
     audioPlayer.currentTime = audioIn;
     audioPlayer.play().catch(() => {});
+  } else if (loopMode === "single") {
+    audioPlayer.pause();
+    audioPlayer.currentTime = audioIn;
   } else if (loopMode === "once") {
     if (currentIndex + 1 < currentCandidates.length) {
       playCandidate(currentIndex + 1);

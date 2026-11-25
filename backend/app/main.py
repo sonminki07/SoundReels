@@ -210,7 +210,7 @@ def on_startup():
     threading.Thread(target=get_scout, daemon=True).start()
 
 def _apply_tail_reverb(y: np.ndarray, sr: int, tail_sec: float) -> np.ndarray:
-    """Appends a natural decaying sustain/reverb tail from the end of the clip without altering the attack."""
+    """Extends the end of the clip with a phase-matched sustain loop that smoothly decays to silence."""
     t_sec = max(0.0, min(5.0, float(tail_sec or 0.0)))
     if t_sec < 0.05 or len(y) < 32:
         return y
@@ -220,41 +220,68 @@ def _apply_tail_reverb(y: np.ndarray, sr: int, tail_sec: float) -> np.ndarray:
 
     def _process_1d(sig: np.ndarray) -> np.ndarray:
         sig = sig.astype(np.float32)
-        src_len = min(len(sig), int(0.35 * sr))
-        seed = sig[-src_len:].copy()
-        fade_in = min(len(seed), int(0.015 * sr))
-        if fade_in > 1:
-            seed[:fade_in] *= np.linspace(0.0, 1.0, fade_in, dtype=np.float32)
-        # Multi-tap decaying comb reflection buffer for smooth bell/SFX sustain tail
-        total_buf = np.zeros(src_len + tail_samples, dtype=np.float32)
-        total_buf[:src_len] = seed
-        delays = [int(0.029 * sr), int(0.037 * sr), int(0.043 * sr), int(0.053 * sr)]
-        gains = [0.68, 0.62, 0.56, 0.50]
-        wet = np.zeros_like(total_buf)
-        for d, g in zip(delays, gains):
-            if d < 1 or d >= len(total_buf):
-                continue
-            buf = total_buf.copy()
-            # Vectorized block-wise feedback decay using exponential overlap
-            step = d
-            pos = step
-            decay_factor = g * (0.001 ** (step / max(1.0, tail_samples)))
-            while pos < len(buf):
-                end = min(len(buf), pos + step)
-                seg_len = end - pos
-                buf[pos:end] += buf[pos - step : pos - step + seg_len] * decay_factor
-                pos += step
-            wet += buf * 0.28
-        tail_part = wet[src_len : src_len + tail_samples].copy()
-        # Smooth exponential decay to silence at the end
-        env = np.linspace(1.0, 0.0, len(tail_part), dtype=np.float32) ** 1.4
+        n = len(sig)
+        # Analyze the final steady portion (up to 0.28s) to find best phase-matched loop period
+        win_len = min(n, int(0.28 * sr))
+        tail_ref = sig[-win_len:]
+        min_lag = max(16, int(0.008 * sr))
+        max_lag = min(win_len // 2, int(0.14 * sr))
+        best_lag = min(win_len // 2, max(min_lag, int(0.04 * sr)))
+        if max_lag > min_lag + 8:
+            probe_len = min(max_lag, int(0.06 * sr))
+            probe = tail_ref[-probe_len:]
+            probe_norm = float(np.sqrt(np.sum(probe * probe)) + 1e-8)
+            best_corr = -1.0
+            for lag in range(min_lag, max_lag + 1):
+                cand = tail_ref[-probe_len - lag : -lag]
+                denom = probe_norm * float(np.sqrt(np.sum(cand * cand)) + 1e-8)
+                corr = float(np.dot(probe, cand)) / denom
+                if corr > best_corr:
+                    best_corr = corr
+                    best_lag = lag
+
+        xfade = max(8, min(best_lag // 3, int(0.015 * sr)))
+        chunk_len = best_lag + xfade
+        if chunk_len > n:
+            loop_unit = sig.copy()
+            xfade = max(4, min(len(loop_unit) // 4, int(0.008 * sr)))
+            best_lag = max(4, len(loop_unit) - xfade)
+        else:
+            loop_unit = sig[-chunk_len:].copy()
+
+        # Build seamless phase-locked sustain tail via overlap-add crossfade
+        ext = np.zeros(tail_samples + xfade, dtype=np.float32)
+        fade_in = np.linspace(0.0, 1.0, xfade, dtype=np.float32)
+        fade_out = 1.0 - fade_in
+        pos = 0
+        while pos < tail_samples:
+            take = min(len(loop_unit), len(ext) - pos)
+            if pos == 0:
+                ext[:take] = loop_unit[:take]
+            else:
+                ov = min(xfade, take)
+                ext[pos : pos + ov] = ext[pos : pos + ov] * fade_out[:ov] + loop_unit[:ov] * fade_in[:ov]
+                if take > ov:
+                    ext[pos + ov : pos + take] = loop_unit[ov:take]
+            pos += max(1, best_lag)
+
+        tail_part = ext[:tail_samples].copy()
+        # Smooth natural exponential decay to exact zero (bell/tone sustain fade-out)
+        t_norm = np.linspace(0.0, 1.0, tail_samples, dtype=np.float32)
+        env = np.exp(-3.6 * t_norm) * (1.0 - t_norm) ** 0.65
         tail_part *= env
-        # Crossfade seam (12ms) between original end and tail start
-        xfade = min(len(sig), len(tail_part), int(0.012 * sr))
+
+        # Blend first xfade samples seamlessly with end of original signal
+        seam = min(n, len(tail_part), xfade)
         out_sig = np.concatenate([sig, tail_part])
-        if xfade > 1:
-            ramp_down = np.linspace(1.0, 0.35, xfade, dtype=np.float32)
-            out_sig[len(sig) - xfade : len(sig)] *= ramp_down
+        if seam > 1:
+            ramp_a = np.linspace(1.0, 0.0, seam, dtype=np.float32)
+            ramp_b = 1.0 - ramp_a
+            # Crossfade original tail end into start of sustain tail without energy dip
+            orig_tail = sig[-seam:]
+            sust_start = tail_part[:seam]
+            blended = orig_tail * ramp_a + sust_start * ramp_b
+            out_sig = np.concatenate([sig[:-seam], blended, tail_part[seam:]])
         return out_sig
 
     if y.ndim == 1:
@@ -704,7 +731,7 @@ def get_sound_audio(
         if abs(pitch_tenths) >= 1:
             suffix_parts.append(f"p{pitch_tenths}")
         if tail_tenths >= 1:
-            suffix_parts.append(f"o{out_ms}_t{tail_tenths}")
+            suffix_parts.append(f"o{out_ms}_t{tail_tenths}_v2")
         proc_path = (AUDIO_CACHE_DIR / f"{sound_id}_{'_'.join(suffix_parts)}.wav").resolve()
         if not proc_path.is_relative_to(AUDIO_CACHE_DIR.resolve()):
             raise HTTPException(status_code=403, detail="Forbidden path")
